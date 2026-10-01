@@ -1,0 +1,72 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg16
+    container_name: tradeforge_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tradeforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradeforge_dev_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-tradeforge}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tradeforge_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: tradeforge_api
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-tradeforge}:${POSTGRES_PASSWORD:-tradeforge_dev_secret}@timescaledb:5432/${POSTGRES_DB:-tradeforge}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-dev_secret_key_needs_replacement_in_prod_12345}
+    volumes:
+      - ./services/api:/app/services/api
+      - ./packages/shared:/app/packages/shared
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: tradeforge_web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/api/v1/ws
+
+volumes:
+  timescale_data:
+  redis_data:

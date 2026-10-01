@@ -1,0 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #0A141F;
+  --bg-surface: #0D1B2A;
+  --bg-card: #132235;
+  --border-color: #1F334A;
+  --text-main: #F1F5F9;
+  --text-muted: #94A3B8;
+  --teal-accent: #0D9488;
+  --teal-glow: rgba(13, 148, 136, 0.2);
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-main);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Enforce tabular digits for financial alignment across tables & metrics */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0A141F;
+}
+::-webkit-scrollbar-thumb {
+  background: #1F334A;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #0D9488;
+}

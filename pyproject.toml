@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradeforge-monorepo"
+version = "0.1.0"
+description = "TradeForge AI Trading Platform for NSE Intraday"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "httpx>=0.27.0",
+    "python-multipart>=0.0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["packages/shared/python", "services/api", "services/risk_guard", "services/engine", "services/execution"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["services", "tests", "packages"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers"
+pythonpath = [
+    ".",
+    "packages/shared/python",
+    "services/api",
+    "services/risk_guard",
+    "services/engine",
+    "services/execution"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
