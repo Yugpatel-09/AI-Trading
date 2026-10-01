@@ -29,6 +29,8 @@ cost_calculator = IndianCostCalculator()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Enforce non-dev environment secrets validation before initializing subsystems
+    settings.validate_production_secrets()
     logger.info("Initializing TradeForge API Gateway...")
     seed_admin_user()
     for sym in ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "HDFCBANK"]:

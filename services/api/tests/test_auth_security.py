@@ -1,12 +1,25 @@
+import os
+
 import pyotp
+import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app.auth.router import seed_admin_user
 from services.api.app.auth.security import security_service
-from services.api.app.core.config import settings
+from services.api.app.brokers.crypto_vault import BrokerTokenVault
+from services.api.app.core.config import Settings, settings
 from services.api.app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def setup_test_admin_credentials():
+    """Ensure test admin credentials exist for test cases."""
+    settings.ADMIN_PASSWORD = settings.ADMIN_PASSWORD or "TradeForge@Admin2026!"
+    settings.ADMIN_TOTP_SECRET = settings.ADMIN_TOTP_SECRET or "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+    seed_admin_user()
+    yield
 
 
 def test_argon2_hashing():
@@ -183,3 +196,45 @@ def test_brute_force_lockout():
     lockout_resp = client.post("/api/v1/auth/login", json={"email": email, "password": "BadPassword"})
     assert lockout_resp.status_code == 429
     assert "locked" in lockout_resp.json()["detail"].lower()
+
+
+def test_non_dev_environment_refuses_to_start_missing_secrets():
+    """Rule 3 Enforcement: Non-development environments refuse to start without real secrets."""
+    # Create production settings object with missing or default secrets
+    prod_settings = Settings(
+        ENVIRONMENT="production",
+        SECRET_KEY="dev_secret_key_needs_replacement_in_production_32chars", # default placeholder
+        ADMIN_PASSWORD=None,
+        ADMIN_TOTP_SECRET=None,
+        ENCRYPTION_KEY_32BYTES_BASE64=None,
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        prod_settings.validate_production_secrets()
+
+    err_text = str(exc_info.value)
+    assert "refuses to start in non-development environment" in err_text
+    assert "SECRET_KEY" in err_text
+    assert "ADMIN_PASSWORD" in err_text
+    assert "ADMIN_TOTP_SECRET" in err_text
+    assert "ENCRYPTION_KEY_32BYTES_BASE64" in err_text
+
+
+def test_token_vault_refuses_to_start_in_non_dev_without_key():
+    """Rule 3 Enforcement: Token vault refuses to start with ephemeral key in non-dev environments."""
+    old_env = os.environ.get("ENVIRONMENT")
+    old_key = os.environ.get("ENCRYPTION_KEY_32BYTES_BASE64")
+    try:
+        os.environ["ENVIRONMENT"] = "production"
+        if "ENCRYPTION_KEY_32BYTES_BASE64" in os.environ:
+            del os.environ["ENCRYPTION_KEY_32BYTES_BASE64"]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            BrokerTokenVault()
+        assert "ENCRYPTION_KEY_32BYTES_BASE64 is missing in non-dev environment" in str(exc_info.value)
+    finally:
+        if old_env is not None:
+            os.environ["ENVIRONMENT"] = old_env
+        else:
+            os.environ.pop("ENVIRONMENT", None)
+        if old_key is not None:
+            os.environ["ENCRYPTION_KEY_32BYTES_BASE64"] = old_key

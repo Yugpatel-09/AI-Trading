@@ -41,11 +41,19 @@ class UserRecord:
 USERS_DB: Dict[str, UserRecord] = {}
 
 
-def seed_admin_user() -> UserRecord:
+def seed_admin_user() -> Optional[UserRecord]:
     """Seed the platform administrator from environment configuration only."""
+    if not settings.ADMIN_EMAIL:
+        return None
     admin_email = settings.ADMIN_EMAIL.strip().lower()
     if admin_email in USERS_DB:
         return USERS_DB[admin_email]
+
+    if not settings.ADMIN_PASSWORD or not settings.ADMIN_TOTP_SECRET:
+        logger.info(
+            "ADMIN_PASSWORD or ADMIN_TOTP_SECRET not provided in environment. Platform admin not seeded."
+        )
+        return None
 
     pw_hash = security_service.hash_password(settings.ADMIN_PASSWORD)
     user = UserRecord(
