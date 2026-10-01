@@ -8,8 +8,7 @@ from tradeforge_shared.enums import BrokerType
 from services.api.app.auth.router import UserRecord, get_current_user
 from services.api.app.brokers.crypto_vault import token_vault
 from services.api.app.core.logging import logger
-from services.execution.gateway.paper_broker import PaperBroker
-from services.execution.gateway.zerodha_adapter import ZerodhaAdapter
+from services.execution.order_manager import order_manager
 
 router = APIRouter(prefix="/api/v1/brokers", tags=["Broker Connection"])
 
@@ -88,17 +87,11 @@ async def get_broker_connections(user: UserRecord = Depends(get_current_user)):
 @router.post("/test-connection")
 async def test_broker_connection(broker: BrokerType, user: UserRecord = Depends(get_current_user)):
     """
-    Test broker connection and fetch available margin/funds.
+    Test broker connection and fetch available margin/funds via OrderManager.
+    Gateways are never instantiated or accessed directly.
     """
     if broker == BrokerType.PAPER:
-        pb = PaperBroker()
-        funds = await pb.get_funds()
-        return {
-            "broker": "PAPER",
-            "connected": True,
-            "funds": funds,
-            "latency_ms": 12,
-        }
+        return await order_manager.test_broker_connection(broker)
 
     user_brokers = BROKER_CONNECTIONS.get(user.user_id, {})
     if broker.value not in user_brokers:
@@ -107,15 +100,8 @@ async def test_broker_connection(broker: BrokerType, user: UserRecord = Depends(
             detail=f"{broker.value} is not connected for this account.",
         )
 
-    # In production decrypt and invoke ZerodhaAdapter
-    za = ZerodhaAdapter(api_key="demo_key", access_token="demo_token")
-    funds = await za.get_funds()
-    return {
-        "broker": broker.value,
-        "connected": True,
-        "funds": funds,
-        "latency_ms": 48,
-    }
+    # Test connection via OrderManager gateway facade
+    return await order_manager.test_broker_connection(broker)
 
 @router.post("/disconnect")
 async def disconnect_broker(payload: DisconnectBrokerRequest, user: UserRecord = Depends(get_current_user)):

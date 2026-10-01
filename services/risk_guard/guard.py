@@ -1,9 +1,14 @@
+import hashlib
+import hmac
+import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set
 
-from tradeforge_shared.enums import TradingMode
+from tradeforge_shared.enums import OrderType, TradingMode
 from tradeforge_shared.schemas import (
     OrderProposal,
+    RiskApproval,
     RiskCheckResult,
     UserRiskSettings,
 )
@@ -18,9 +23,15 @@ class RiskGuard:
     Non-negotiable Rule 1: Every order must pass the Risk Guard.
     No code path may place an order without passing these checks.
     """
-    def __init__(self, kill_switch: Optional[KillSwitch] = None, watchdog: Optional[FeedWatchdog] = None):
+    def __init__(
+        self,
+        kill_switch: Optional[KillSwitch] = None,
+        watchdog: Optional[FeedWatchdog] = None,
+        signing_secret: Optional[str] = None,
+    ):
         self.kill_switch = kill_switch or KillSwitch()
         self.watchdog = watchdog or FeedWatchdog()
+        self.signing_secret = signing_secret or os.getenv("SECRET_KEY", "tradeforge_risk_guard_hmac_signing_key_default_32b")
         self._processed_idempotency_keys: Set[str] = set()
         self._user_daily_pnl: Dict[str, float] = {}
         self._user_open_positions: Dict[str, int] = {}
@@ -166,9 +177,45 @@ class RiskGuard:
             )
 
         approved = len(violations) == 0
+        approval: Optional[RiskApproval] = None
         if approved:
             # Rule 8: Record idempotency key strictly after order is approved
             self._processed_idempotency_keys.add(proposal.idempotency_key)
+
+            # Construct tamper-evident RiskApproval signed exclusively by RiskGuard
+            canonical_proposal_data = (
+                f"{proposal.user_id}:{proposal.broker.value}:{proposal.mode.value}:"
+                f"{signal.symbol}:{signal.side.value}:{proposal.requested_quantity}:"
+                f"{signal.entry_price:.4f}:{signal.stop_loss:.4f}:{signal.target:.4f}:"
+                f"{proposal.idempotency_key}"
+            )
+            proposal_hash = hashlib.sha256(canonical_proposal_data.encode("utf-8")).hexdigest()
+            approval_id = f"apr_{uuid.uuid4().hex[:12]}"
+            expires_at = now + timedelta(seconds=30)
+
+            approval = RiskApproval(
+                approval_id=approval_id,
+                proposal_hash=proposal_hash,
+                user_id=proposal.user_id,
+                broker=proposal.broker,
+                symbol=signal.symbol,
+                side=signal.side,
+                order_type=OrderType.MARKET,
+                approved_quantity=adjusted_quantity,
+                price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+                target=signal.target,
+                idempotency_key=proposal.idempotency_key,
+                mode=proposal.mode,
+                created_at=now,
+                expires_at=expires_at,
+                signature="",
+            )
+            approval.signature = hmac.new(
+                self.signing_secret.encode("utf-8"),
+                approval.canonical_payload().encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
 
         reason = "Risk checks passed successfully" if approved else "; ".join(violations)
 
@@ -178,6 +225,7 @@ class RiskGuard:
             adjusted_quantity=adjusted_quantity if approved else 0,
             calculated_risk_inr=calculated_risk if approved else 0.0,
             violations=violations,
+            approval=approval,
         )
 
     def record_trade_execution(self, user_id: str):

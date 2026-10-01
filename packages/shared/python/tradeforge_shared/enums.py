@@ -22,6 +22,7 @@ class OrderType(str, Enum):
 class OrderStatus(str, Enum):
     """Lifecycle status of an execution order."""
     PENDING = "PENDING"
+    PENDING_USER_APPROVAL = "PENDING_USER_APPROVAL"
     RISK_APPROVED = "RISK_APPROVED"
     RISK_REJECTED = "RISK_REJECTED"
     SUBMITTED = "SUBMITTED"
@@ -29,6 +30,7 @@ class OrderStatus(str, Enum):
     FILLED = "FILLED"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
 
 class MarketRegime(str, Enum):
     """Market regime classification evaluated by Specialist 1."""

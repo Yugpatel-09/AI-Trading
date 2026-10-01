@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -61,6 +63,57 @@ class UserRiskSettings(BaseModel):
     trading_start_time_ist: str = "09:20:00"
     trading_end_time_ist: str = "15:00:00"
 
+class RiskApproval(BaseModel):
+    """
+    Cryptographic, tamper-evident proof of Risk Guard authorization.
+    Non-negotiable Rule 1: Every broker order MUST be backed by a valid, unexpired,
+    un-reused RiskApproval constructed exclusively by RiskGuard.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    approval_id: str
+    proposal_hash: str
+    user_id: str
+    broker: BrokerType
+    symbol: str
+    side: OrderSide
+    order_type: OrderType = OrderType.MARKET
+    approved_quantity: int
+    price: float
+    stop_loss: float
+    target: float
+    idempotency_key: str
+    mode: TradingMode
+    created_at: datetime
+    expires_at: datetime
+    signature: str
+
+    def canonical_payload(self) -> str:
+        created_epoch = int(self.created_at.timestamp())
+        expires_epoch = int(self.expires_at.timestamp())
+        return (
+            f"{self.approval_id}:{self.proposal_hash}:{self.user_id}:{self.broker.value}:"
+            f"{self.symbol}:{self.side.value}:{self.order_type.value}:{self.approved_quantity}:"
+            f"{self.price:.4f}:{self.stop_loss:.4f}:{self.target:.4f}:{self.idempotency_key}:"
+            f"{self.mode.value}:{created_epoch}:{expires_epoch}"
+        )
+
+    def verify_signature(self, secret_key: str) -> bool:
+        if not secret_key:
+            return False
+        expected_sig = hmac.new(
+            secret_key.encode("utf-8"),
+            self.canonical_payload().encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(self.signature, expected_sig)
+
+    def is_expired(self, current_time: Optional[datetime] = None) -> bool:
+        now = current_time or datetime.now(timezone.utc)
+        exp = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=timezone.utc)
+        now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        return now_utc > exp
+
 class RiskCheckResult(BaseModel):
     """Output from RiskGuard validation."""
     approved: bool
@@ -68,6 +121,7 @@ class RiskCheckResult(BaseModel):
     adjusted_quantity: int = 0
     calculated_risk_inr: float = 0.0
     violations: List[str] = Field(default_factory=list)
+    approval: Optional[RiskApproval] = None
 
 class OrderProposal(BaseModel):
     """Order submitted to Risk Guard for validation."""
