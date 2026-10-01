@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = Field(default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60)
     ADMIN_EMAIL: str = Field(default="admin@tradeforge.io")
+    ADMIN_PASSWORD: str = Field(default="TradeForge@Admin2026!")
+    ADMIN_TOTP_SECRET: str = Field(default="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
 
     # Database & Redis
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./tradeforge_dev.db")

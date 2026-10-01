@@ -4,7 +4,9 @@ import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
+from services.api.app.auth.router import seed_admin_user
 from services.api.app.auth.security import security_service
+from services.api.app.core.config import settings
 from services.api.app.main import app
 from services.api.app.risk.service import global_kill_switch, global_watchdog
 
@@ -12,7 +14,7 @@ client = TestClient(app)
 
 
 def register_and_login_user(email: str, password: str = "SecurePass123!", is_admin: bool = False):
-    """Helper to create and authenticate a test user with 2FA."""
+    """Helper to create and authenticate a test user with verified email and 2FA."""
     # Ensure any previous attempts are cleared
     security_service.reset_failed_attempts(email)
 
@@ -30,8 +32,16 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
     signup_data = signup_res.json()
     secret = signup_data["totp_secret"]
     user_id = signup_data["user_id"]
+    email_token = signup_data["email_verification_token"]
 
-    # Verify 2FA to activate session
+    # 1. Verify email
+    v_res = client.post(
+        "/api/v1/auth/verify-email",
+        json={"email": email, "token": email_token},
+    )
+    assert v_res.status_code == 200, v_res.text
+
+    # 2. Verify 2FA to activate session
     totp = pyotp.TOTP(secret)
     token = totp.now()
     verify_res = client.post(
@@ -42,6 +52,23 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
     access_token = verify_res.json()["access_token"]
     headers = {"Authorization": f"Bearer {access_token}"}
     return user_id, headers
+
+
+def login_admin():
+    """Authenticate platform administrator seeded from environment."""
+    seed_admin_user()
+    totp = pyotp.TOTP(settings.ADMIN_TOTP_SECRET)
+    login_res = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": settings.ADMIN_EMAIL,
+            "password": settings.ADMIN_PASSWORD,
+            "totp_token": totp.now(),
+        },
+    )
+    assert login_res.status_code == 200, login_res.text
+    token = login_res.json()["access_token"]
+    return "usr_admin_platform", {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(autouse=True)
@@ -179,7 +206,7 @@ def test_regular_user_cannot_activate_or_deactivate_global_kill_switch():
 
 def test_admin_can_activate_and_deactivate_global_kill_switch():
     """Security Check: Admin user (admin@tradeforge.io) can control the global kill switch."""
-    admin_id, admin_headers = register_and_login_user("admin@tradeforge.io")
+    admin_id, admin_headers = login_admin()
     user_id, user_headers = register_and_login_user("user_under_halt@tradeforge.io")
 
     # Admin activates global kill switch
