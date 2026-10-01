@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
+
 from tradeforge_shared.schemas import ExecutionOrder, OrderProposal
-from tradeforge_shared.enums import OrderStatus
+
 
 class BrokerGateway(ABC):
     """

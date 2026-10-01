@@ -1,8 +1,8 @@
-import pytest
-from fastapi.testclient import TestClient
 from datetime import datetime, timezone
+
+from fastapi.testclient import TestClient
+
 from services.api.app.main import app
-from tradeforge_shared.enums import TradingMode, OrderSide, StrategyType, MarketRegime
 
 client = TestClient(app)
 

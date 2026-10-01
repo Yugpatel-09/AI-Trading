@@ -1,7 +1,9 @@
 import uuid
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, status, Depends, Header
+from typing import Dict, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
+
 from services.api.app.auth.security import security_service
 from services.api.app.core.logging import logger
 

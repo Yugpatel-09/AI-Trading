@@ -1,9 +1,8 @@
-import pytest
 from scripts.seed_data import generate_candles
+from services.backtester.engine import Backtester
 from services.engine.strategies.scalper_1m import Scalper1M
 from services.engine.strategies.scalper_5m import Scalper5M
-from services.backtester.engine import Backtester
-from tradeforge_shared.costs import IndianCostCalculator
+
 
 def test_backtester_runs_scalper_with_indian_costs():
     candles = generate_candles("RELIANCE", base_price=2500.0, count=100, timeframe="1m")

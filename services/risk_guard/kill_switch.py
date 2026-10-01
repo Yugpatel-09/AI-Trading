@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+
 class KillSwitch:
     """
     Global and user-specific Emergency Circuit Breaker.

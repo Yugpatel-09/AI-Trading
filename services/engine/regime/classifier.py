@@ -1,8 +1,10 @@
-import pandas as pd
 from typing import List
-from tradeforge_shared.schemas import Candle
+
 from tradeforge_shared.enums import MarketRegime
-from services.engine.features/indicators import TechnicalIndicators
+from tradeforge_shared.schemas import Candle
+
+from services.engine.features.indicators import TechnicalIndicators
+
 
 class RegimeDetector:
     """
@@ -15,7 +17,7 @@ class RegimeDetector:
 
         df = TechnicalIndicators.compute_all_features(candles)
         recent = df.iloc[-1]
-        
+
         atr = recent.get("atr", 10.0)
         close = recent.get("close", 100.0)
         atr_pct = (atr / close) * 100.0 if close > 0 else 0

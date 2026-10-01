@@ -1,10 +1,13 @@
-import pytest
 from datetime import datetime, timedelta, timezone
-from tradeforge_shared.enums import TradingMode, OrderSide, StrategyType, MarketRegime
-from tradeforge_shared.schemas import Signal, OrderProposal, UserRiskSettings
+
+import pytest
+from tradeforge_shared.enums import MarketRegime, OrderSide, StrategyType, TradingMode
+from tradeforge_shared.schemas import OrderProposal, Signal, UserRiskSettings
+
 from services.risk_guard.guard import RiskGuard
 from services.risk_guard.kill_switch import KillSwitch
 from services.risk_guard.watchdog import FeedWatchdog
+
 
 @pytest.fixture
 def test_setup():
@@ -40,7 +43,7 @@ def test_setup():
 def test_dead_feed_triggers_halt(test_setup):
     """Failure Drill 1: Stale market feed (> 5000ms) halts trading."""
     guard, ks, wd, user_settings, sig = test_setup
-    
+
     # Tick arrived 8 seconds ago
     old_time = datetime.now(timezone.utc) - timedelta(seconds=8)
     wd.record_heartbeat("NIFTY", timestamp=old_time)
@@ -86,7 +89,7 @@ def test_kill_switch_emergency_halt(test_setup):
 def test_fat_finger_circuit_rejection(test_setup):
     """Failure Drill 4: Fat finger price deviation > 2.5% from LTP rejected."""
     guard, ks, wd, user_settings, sig = test_setup
-    
+
     # Signal proposes buying at 22,700 when current LTP is 22,000 (> 3.1% deviation)
     bad_sig = Signal(
         id="sig_fat_finger",

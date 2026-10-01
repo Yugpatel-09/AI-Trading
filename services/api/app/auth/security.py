@@ -1,12 +1,13 @@
 import time
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Optional, Tuple
+
 import jwt
 import pyotp
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Tuple
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+
 from services.api.app.core.config import settings
-from services.api.app.core.logging import logger
 
 ph = PasswordHasher()
 

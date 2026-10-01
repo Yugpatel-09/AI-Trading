@@ -1,10 +1,13 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, List
-from tradeforge_shared.schemas import ExecutionOrder, OrderProposal
-from tradeforge_shared.enums import OrderStatus, OrderType, BrokerType
+from typing import Any, Dict, List
+
 from tradeforge_shared.costs import IndianCostCalculator
+from tradeforge_shared.enums import BrokerType, OrderStatus, OrderType
+from tradeforge_shared.schemas import ExecutionOrder, OrderProposal
+
 from services.execution.gateway.base import BrokerGateway
+
 
 class PaperBroker(BrokerGateway):
     """

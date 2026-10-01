@@ -1,9 +1,12 @@
 import uuid
 from typing import Optional
+
+from tradeforge_shared.enums import MarketRegime, OrderSide, StrategyType
 from tradeforge_shared.schemas import Signal
-from tradeforge_shared.enums import StrategyType, OrderSide, MarketRegime
-from services.engine.strategies.base import BaseStrategy, StrategyContext
+
 from services.engine.features.indicators import TechnicalIndicators
+from services.engine.strategies.base import BaseStrategy, StrategyContext
+
 
 class Scalper5M(BaseStrategy):
     """

@@ -1,7 +1,8 @@
-import asyncio
 import json
 from datetime import datetime, timezone
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
 from services.api.app.core.logging import logger
 
 router = APIRouter(tags=["WebSockets"])

@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class TradingMode(str, Enum):
     """Platform operating mode for order routing."""
     PAPER = "PAPER"       # Virtual simulation on live market feeds (Default)

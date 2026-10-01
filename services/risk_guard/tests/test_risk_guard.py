@@ -1,9 +1,11 @@
-import pytest
 from datetime import datetime, timezone
-from tradeforge_shared.enums import TradingMode, OrderSide, StrategyType, MarketRegime
-from tradeforge_shared.schemas import Signal, OrderProposal, UserRiskSettings
+
+import pytest
+from tradeforge_shared.enums import MarketRegime, OrderSide, StrategyType, TradingMode
+from tradeforge_shared.schemas import OrderProposal, Signal, UserRiskSettings
+
 from services.risk_guard.guard import RiskGuard
-from services.risk_guard.kill_switch import KillSwitch
+
 
 @pytest.fixture
 def risk_guard():

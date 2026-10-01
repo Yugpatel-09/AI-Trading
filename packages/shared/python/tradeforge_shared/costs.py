@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Any, Dict
+
 
 @dataclass(frozen=True)
 class IndianCostBreakdown:
@@ -34,7 +35,7 @@ class IndianCostBreakdown:
 class IndianCostCalculator:
     """
     Statutory Indian intraday equity transaction cost calculator.
-    
+
     Standard Indian Rates (NSE Intraday Equities):
     - Brokerage: Min(₹20 per executed order, 0.03% of turnover)
     - STT (Securities Transaction Tax): 0.025% on sell side turnover

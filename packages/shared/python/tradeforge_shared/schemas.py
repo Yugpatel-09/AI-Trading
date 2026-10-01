@@ -1,15 +1,18 @@
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
 from tradeforge_shared.enums import (
-    TradingMode,
-    OrderSide,
-    OrderType,
-    OrderStatus,
-    MarketRegime,
-    StrategyType,
     BrokerType,
+    MarketRegime,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    StrategyType,
+    TradingMode,
 )
+
 
 class Candle(BaseModel):
     """OHLCV market bar."""

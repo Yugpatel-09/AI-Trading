@@ -1,9 +1,9 @@
-import pytest
 import pyotp
 from fastapi.testclient import TestClient
-from services.api.app.main import app
-from services.api.app.auth.router import router, USERS_DB
+
+from services.api.app.auth.router import router
 from services.api.app.auth.security import security_service
+from services.api.app.main import app
 
 client = TestClient(app)
 
@@ -55,7 +55,7 @@ def test_signup_and_2fa_verification_flow():
 def test_brute_force_lockout():
     email = "locked_user@tradeforge.io"
     security_service.reset_failed_attempts(email)
-    
+
     # Register user first
     signup_payload = {
         "email": email,

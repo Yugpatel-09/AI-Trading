@@ -1,13 +1,16 @@
-from datetime import datetime, time, timezone
-from typing import Set, Dict, Optional
+from datetime import datetime, timezone
+from typing import Dict, Optional, Set
+
+from tradeforge_shared.enums import TradingMode
 from tradeforge_shared.schemas import (
     OrderProposal,
-    UserRiskSettings,
     RiskCheckResult,
+    UserRiskSettings,
 )
-from tradeforge_shared.enums import TradingMode
+
 from services.risk_guard.kill_switch import KillSwitch
 from services.risk_guard.watchdog import FeedWatchdog
+
 
 class RiskGuard:
     """
@@ -49,6 +52,12 @@ class RiskGuard:
         # 1. Kill Switch Check
         if self.kill_switch.is_active_for_user(user_id):
             violations.append("Kill switch is active. Trading is halted.")
+
+        # Watchdog data feed check
+        if signal.symbol in self.watchdog._last_tick_time:
+            is_fresh, delay_ms = self.watchdog.is_feed_fresh(signal.symbol, current_time=now)
+            if not is_fresh:
+                violations.append(f"Market data feed is stale ({delay_ms}ms > {self.watchdog.max_staleness_ms}ms). Trading halted.")
 
         # 2. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
         if proposal.idempotency_key in self._processed_idempotency_keys:

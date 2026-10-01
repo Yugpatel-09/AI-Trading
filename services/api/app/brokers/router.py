@@ -1,13 +1,15 @@
 from datetime import datetime, timezone
-from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, status, Depends
+from typing import Any, Dict
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from tradeforge_shared.enums import BrokerType
-from services.api.app.auth.router import get_current_user, UserRecord
+
+from services.api.app.auth.router import UserRecord, get_current_user
 from services.api.app.brokers.crypto_vault import token_vault
+from services.api.app.core.logging import logger
 from services.execution.gateway.paper_broker import PaperBroker
 from services.execution.gateway.zerodha_adapter import ZerodhaAdapter
-from services.api.app.core.logging import logger
 
 router = APIRouter(prefix="/api/v1/brokers", tags=["Broker Connection"])
 

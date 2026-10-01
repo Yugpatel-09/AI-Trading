@@ -1,6 +1,5 @@
 import logging
 import re
-from typing import Any
 
 # Redaction patterns for sensitive authorization credentials
 SENSITIVE_PATTERNS = [
@@ -24,7 +23,7 @@ class RedactingFormatter(logging.Formatter):
 def setup_secure_logging(level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger("tradeforge")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
-    
+
     # Avoid duplicate handlers
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -34,7 +33,7 @@ def setup_secure_logging(level: str = "INFO") -> logging.Logger:
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        
+
     return logger
 
 logger = setup_secure_logging()

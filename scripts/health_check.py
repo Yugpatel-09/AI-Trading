@@ -4,8 +4,10 @@ TradeForge Operational Health Check Script.
 Validates database, redis, and API gateway connectivity.
 """
 import sys
-import httpx
 from datetime import datetime, timezone
+
+import httpx
+
 
 def run_diagnostics(api_url: str = "http://localhost:8000"):
     print(f"[*] Running TradeForge System Diagnostic on {api_url} at {datetime.now(timezone.utc).isoformat()}...")

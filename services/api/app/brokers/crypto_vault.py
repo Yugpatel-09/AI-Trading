@@ -1,8 +1,8 @@
-import os
 import base64
-from typing import Tuple
+import os
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from services.api.app.core.config import settings
+
 
 class BrokerTokenVault:
     """

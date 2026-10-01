@@ -1,7 +1,8 @@
-import numpy as np
+from typing import List
+
 import pandas as pd
-from typing import List, Dict, Tuple
 from tradeforge_shared.schemas import Candle
+
 
 class TechnicalIndicators:
     """

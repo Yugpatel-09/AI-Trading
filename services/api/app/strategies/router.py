@@ -1,12 +1,12 @@
-from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from tradeforge_shared.enums import StrategyType
+
+from scripts.seed_data import generate_candles
+from services.backtester.engine import Backtester
 from services.engine.strategies.scalper_1m import Scalper1M
 from services.engine.strategies.scalper_5m import Scalper5M
 from services.engine.strategies.scalper_10m_orb import Scalper10MORB
-from services.backtester.engine import Backtester
-from scripts.seed_data import generate_candles
 
 router = APIRouter(prefix="/api/v1/strategies", tags=["Strategies & Backtesting"])
 

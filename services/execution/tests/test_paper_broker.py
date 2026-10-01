@@ -1,8 +1,11 @@
-import pytest
 from datetime import datetime, timezone
-from tradeforge_shared.enums import TradingMode, OrderSide, StrategyType, MarketRegime, OrderStatus
-from tradeforge_shared.schemas import Signal, OrderProposal
+
+import pytest
+from tradeforge_shared.enums import MarketRegime, OrderSide, OrderStatus, StrategyType, TradingMode
+from tradeforge_shared.schemas import OrderProposal, Signal
+
 from services.execution.gateway.paper_broker import PaperBroker
+
 
 @pytest.mark.asyncio
 async def test_paper_broker_order_placement_and_fill():

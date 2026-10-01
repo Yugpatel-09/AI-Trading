@@ -5,7 +5,9 @@ Generates realistic 1m, 5m, and 10m OHLCV candle datasets for NIFTY, BANKNIFTY, 
 """
 import random
 from datetime import datetime, timedelta, timezone
+
 from tradeforge_shared.schemas import Candle
+
 
 def generate_candles(symbol: str = "NIFTY", base_price: float = 22000.0, count: int = 100, timeframe: str = "1m"):
     candles = []

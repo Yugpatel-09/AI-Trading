@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Optional, List
-from tradeforge_shared.schemas import Candle, Signal
+from typing import List, Optional
+
 from tradeforge_shared.enums import StrategyType
+from tradeforge_shared.schemas import Candle, Signal
+
 
 class StrategyContext:
     """Market context passed into strategy on each candle close."""

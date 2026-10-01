@@ -1,30 +1,29 @@
 import time
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from typing import Dict, Any
+from datetime import datetime, timezone
+from typing import Any, Dict
 
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
 from tradeforge_shared.costs import IndianCostCalculator
-from tradeforge_shared.schemas import (
-    SystemHealthStatus,
-    OrderProposal,
-    UserRiskSettings,
-    RiskCheckResult,
-)
 from tradeforge_shared.enums import TradingMode
-from services.risk_guard.guard import RiskGuard
-from services.risk_guard.kill_switch import KillSwitch
-from services.risk_guard.watchdog import FeedWatchdog
-from services.api.app.core.config import settings
-from services.api.app.core.logging import logger
+from tradeforge_shared.schemas import (
+    OrderProposal,
+    RiskCheckResult,
+    SystemHealthStatus,
+    UserRiskSettings,
+)
 
 from services.api.app.auth.router import router as auth_router
 from services.api.app.brokers.router import router as broker_router
+from services.api.app.core.config import settings
+from services.api.app.core.logging import logger
 from services.api.app.strategies.router import router as strategy_router
 from services.api.app.ws.router import router as ws_router
+from services.risk_guard.guard import RiskGuard
+from services.risk_guard.kill_switch import KillSwitch
+from services.risk_guard.watchdog import FeedWatchdog
 
 # Initialize singleton Risk Guard & Kill Switch for the API process
 global_kill_switch = KillSwitch()

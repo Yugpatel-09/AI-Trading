@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+
 class FeedWatchdog:
     """
     Monitors market data freshness and feed latency.

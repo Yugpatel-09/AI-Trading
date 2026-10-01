@@ -1,10 +1,13 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
+
+from tradeforge_shared.enums import BrokerType, OrderSide, OrderStatus, OrderType
 from tradeforge_shared.schemas import ExecutionOrder, OrderProposal
-from tradeforge_shared.enums import OrderStatus, OrderType, BrokerType
-from services.execution.gateway.base import BrokerGateway
+
 from services.api.app.core.logging import logger
+from services.execution.gateway.base import BrokerGateway
+
 
 class ZerodhaAdapter(BrokerGateway):
     """
@@ -64,7 +67,7 @@ class ZerodhaAdapter(BrokerGateway):
             user_id="kite_user",
             broker=BrokerType.ZERODHA,
             symbol="NIFTY",
-            side=proposal_side if 'proposal_side' in locals() else "BUY",
+            side=OrderSide.BUY,
             order_type=OrderType.LIMIT,
             quantity=50,
             price=22000.0,
