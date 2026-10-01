@@ -1,10 +1,17 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from tradeforge_shared.enums import MarketRegime, OrderSide, StrategyType, TradingMode
 from tradeforge_shared.schemas import OrderProposal, Signal, UserRiskSettings
 
 from services.risk_guard.guard import RiskGuard
+
+
+@pytest.fixture
+def market_time():
+    """Valid trading session timestamp (10:30 IST)."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime(2026, 10, 1, 10, 30, 0, tzinfo=ist)
 
 
 @pytest.fixture
@@ -49,7 +56,7 @@ def sample_signal():
         reason="VWAP bounce in strong 5m trend",
     )
 
-def test_risk_guard_approves_valid_proposal(risk_guard, default_user_settings, sample_signal):
+def test_risk_guard_approves_valid_proposal(risk_guard, default_user_settings, sample_signal, market_time):
     proposal = OrderProposal(
         idempotency_key="idem_001",
         user_id="usr_test_123",
@@ -57,12 +64,12 @@ def test_risk_guard_approves_valid_proposal(risk_guard, default_user_settings, s
         requested_quantity=50, # Risk = 50 * 10 = Rs. 500 <= 1000 limit
         mode=TradingMode.PAPER,
     )
-    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
     assert result.approved is True
     assert result.adjusted_quantity == 50
     assert result.calculated_risk_inr == 500.0
 
-def test_risk_guard_kill_switch_halts_trading(risk_guard, default_user_settings, sample_signal):
+def test_risk_guard_kill_switch_halts_trading(risk_guard, default_user_settings, sample_signal, market_time):
     risk_guard.kill_switch.activate_global("Emergency NSE Market Crash")
     proposal = OrderProposal(
         idempotency_key="idem_002",
@@ -71,11 +78,11 @@ def test_risk_guard_kill_switch_halts_trading(risk_guard, default_user_settings,
         requested_quantity=50,
         mode=TradingMode.PAPER,
     )
-    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
     assert result.approved is False
     assert any("Kill switch" in v for v in result.violations)
 
-def test_risk_guard_rejects_duplicate_idempotency_key(risk_guard, default_user_settings, sample_signal):
+def test_risk_guard_rejects_duplicate_idempotency_key(risk_guard, default_user_settings, sample_signal, market_time):
     proposal = OrderProposal(
         idempotency_key="idem_duplicate",
         user_id="usr_test_123",
@@ -83,15 +90,42 @@ def test_risk_guard_rejects_duplicate_idempotency_key(risk_guard, default_user_s
         requested_quantity=50,
         mode=TradingMode.PAPER,
     )
-    res1 = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    res1 = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
     assert res1.approved is True
 
     # Same submission must be rejected
-    res2 = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    res2 = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
     assert res2.approved is False
     assert any("Duplicate order" in v for v in res2.violations)
 
-def test_risk_guard_downscales_quantity_to_honor_max_risk(risk_guard, default_user_settings, sample_signal):
+def test_risk_guard_idempotency_key_not_recorded_if_rejected(risk_guard, default_user_settings, sample_signal, market_time):
+    """Rule 8: Rejected proposals must NOT record the idempotency key, allowing subsequent valid submission."""
+    # Submit proposal with fat-finger price deviation (2800 vs LTP 2500 -> 12% deviation > 2.5% max)
+    bad_signal = sample_signal.model_copy(update={"entry_price": 2800.0, "stop_loss": 2790.0})
+    proposal = OrderProposal(
+        idempotency_key="idem_correctable_key",
+        user_id="usr_test_123",
+        signal=bad_signal,
+        requested_quantity=50,
+        mode=TradingMode.PAPER,
+    )
+    res1 = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
+    assert res1.approved is False
+    assert "idem_correctable_key" not in risk_guard._processed_idempotency_keys
+
+    # Resubmit with corrected price using the same idempotency key -> Must succeed
+    corrected_proposal = OrderProposal(
+        idempotency_key="idem_correctable_key",
+        user_id="usr_test_123",
+        signal=sample_signal,
+        requested_quantity=50,
+        mode=TradingMode.PAPER,
+    )
+    res2 = risk_guard.validate_proposal(corrected_proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
+    assert res2.approved is True
+    assert "idem_correctable_key" in risk_guard._processed_idempotency_keys
+
+def test_risk_guard_downscales_quantity_to_honor_max_risk(risk_guard, default_user_settings, sample_signal, market_time):
     # User asks for 200 shares. Risk = 200 * 10 = Rs. 2000, which exceeds max_loss_per_trade of 1000
     proposal = OrderProposal(
         idempotency_key="idem_oversize",
@@ -100,7 +134,7 @@ def test_risk_guard_downscales_quantity_to_honor_max_risk(risk_guard, default_us
         requested_quantity=200,
         mode=TradingMode.PAPER,
     )
-    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0, current_time=market_time)
     assert result.approved is True
     # Quantity downsized to 100 shares (100 * 10 = Rs. 1000)
     assert result.adjusted_quantity == 100

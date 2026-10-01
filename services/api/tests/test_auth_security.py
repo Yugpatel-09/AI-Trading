@@ -1,10 +1,11 @@
 import os
+from datetime import datetime, timedelta, timezone
 
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.app.auth.router import seed_admin_user
+from services.api.app.auth.router import USERS_DB, seed_admin_user
 from services.api.app.auth.security import security_service
 from services.api.app.brokers.crypto_vault import BrokerTokenVault
 from services.api.app.core.config import Settings, settings
@@ -41,6 +42,7 @@ def test_totp_generation_and_validation():
 
 def test_signup_email_verification_and_2fa_flow():
     email = "trader_verified_test@tradeforge.io"
+    security_service.reset_failed_attempts(email)
     signup_payload = {
         "email": email,
         "password": "StrongPassword!2026",
@@ -48,20 +50,25 @@ def test_signup_email_verification_and_2fa_flow():
         "consent_terms": True,
         "consent_data_use": True,
     }
-    # 1. Signup
+    # 1. Signup: Token must NOT be returned in response (sent via email service)
     res = client.post("/api/v1/auth/signup", json=signup_payload)
     assert res.status_code == 200, res.text
     data = res.json()
-    assert "email_verification_token" in data
+    assert "email_verification_token" not in data
     assert "totp_secret" in data
-    v_token = data["email_verification_token"]
     secret = data["totp_secret"]
+
+    # Server holds token securely for dispatch
+    user = USERS_DB.get(email)
+    assert user is not None
+    v_token = user.email_verification_token
+    assert v_token is not None
 
     # 2. Attempt 2FA BEFORE email verification -> MUST BE REJECTED (403 Forbidden)
     totp = pyotp.TOTP(secret)
     early_2fa = client.post(
         "/api/v1/auth/verify-2fa",
-        json={"email": email, "totp_token": totp.now()},
+        json={"email": email, "password": "StrongPassword!2026", "totp_token": totp.now()},
     )
     assert early_2fa.status_code == 403
     assert "not verified" in early_2fa.json()["detail"].lower()
@@ -82,11 +89,11 @@ def test_signup_email_verification_and_2fa_flow():
     assert good_v.status_code == 200
     assert good_v.json()["is_email_verified"] is True
 
-    # 5. Verify 2FA AFTER email verification -> SUCCESS
+    # 5. Verify 2FA AFTER email verification with correct password -> SUCCESS
     token = totp.now()
     verify_res = client.post(
         "/api/v1/auth/verify-2fa",
-        json={"email": email, "totp_token": token},
+        json={"email": email, "password": "StrongPassword!2026", "totp_token": token},
     )
     assert verify_res.status_code == 200
     vdata = verify_res.json()
@@ -101,6 +108,100 @@ def test_signup_email_verification_and_2fa_flow():
     me_data = me_res.json()
     assert me_data["is_email_verified"] is True
     assert me_data["is_admin"] is False
+
+
+def test_email_verification_token_expires_after_24_hours():
+    """Security Check: Email verification tokens older than 24 hours must be rejected."""
+    email = "expired_token_user@tradeforge.io"
+    security_service.reset_failed_attempts(email)
+    client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": email,
+            "password": "StrongPassword!2026",
+            "consent_risk_disclosure": True,
+            "consent_terms": True,
+            "consent_data_use": True,
+        },
+    )
+    user = USERS_DB[email]
+    token = user.email_verification_token
+
+    # Simulate token sent 25 hours ago
+    user.email_verification_sent_at = datetime.now(timezone.utc) - timedelta(hours=25)
+
+    res = client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
+    assert res.status_code == 400
+    assert "expired after 24 hours" in res.json()["detail"].lower()
+
+
+def test_resend_verification_does_not_return_token():
+    """Security Check: Resending verification token dispatches it via email and conceals from response."""
+    email = "resend_token_user@tradeforge.io"
+    security_service.reset_failed_attempts(email)
+    client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": email,
+            "password": "StrongPassword!2026",
+            "consent_risk_disclosure": True,
+            "consent_terms": True,
+            "consent_data_use": True,
+        },
+    )
+    user = USERS_DB[email]
+    initial_token = user.email_verification_token
+
+    res = client.post("/api/v1/auth/resend-verification", json={"email": email})
+    assert res.status_code == 200
+    data = res.json()
+    assert "email_verification_token" not in data
+    # Token was rotated in backend
+    assert user.email_verification_token != initial_token
+
+
+def test_verify_2fa_requires_password_and_locks_out():
+    """Security Check: /verify-2fa validates password and locks out after 5 consecutive failures."""
+    email = "twofa_lockout_user@tradeforge.io"
+    security_service.reset_failed_attempts(email)
+    s_res = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": email,
+            "password": "CorrectPassword123!",
+            "consent_risk_disclosure": True,
+            "consent_terms": True,
+            "consent_data_use": True,
+        },
+    )
+    secret = s_res.json()["totp_secret"]
+    token = USERS_DB[email].email_verification_token
+    client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
+
+    totp = pyotp.TOTP(secret)
+
+    # 1. Wrong password rejected
+    bad_pw_res = client.post(
+        "/api/v1/auth/verify-2fa",
+        json={"email": email, "password": "WrongPassword!", "totp_token": totp.now()},
+    )
+    assert bad_pw_res.status_code == 401
+    assert "invalid password" in bad_pw_res.json()["detail"].lower()
+
+    # 2. Complete 5 consecutive failures
+    for _ in range(4):
+        client.post(
+            "/api/v1/auth/verify-2fa",
+            json={"email": email, "password": "WrongPassword!", "totp_token": totp.now()},
+        )
+
+    # 3. 6th attempt must trigger HTTP 429 Too Many Requests lockout
+    lockout_res = client.post(
+        "/api/v1/auth/verify-2fa",
+        json={"email": email, "password": "CorrectPassword123!", "totp_token": totp.now()},
+    )
+    assert lockout_res.status_code == 429
+    assert "locked" in lockout_res.json()["detail"].lower()
 
 
 def test_admin_seeded_from_env_only():
@@ -156,16 +257,17 @@ def test_cannot_signup_as_admin():
     assert res_other.status_code == 200
     data = res_other.json()
 
-    # Verify email
+    # Verify email via server token
+    user = USERS_DB["normal_trader_not_admin@tradeforge.io"]
     client.post(
         "/api/v1/auth/verify-email",
-        json={"email": "normal_trader_not_admin@tradeforge.io", "token": data["email_verification_token"]},
+        json={"email": "normal_trader_not_admin@tradeforge.io", "token": user.email_verification_token},
     )
     # Verify 2FA
     totp = pyotp.TOTP(data["totp_secret"])
     v_res = client.post(
         "/api/v1/auth/verify-2fa",
-        json={"email": "normal_trader_not_admin@tradeforge.io", "totp_token": totp.now()},
+        json={"email": "normal_trader_not_admin@tradeforge.io", "password": "ValidPassword!2026", "totp_token": totp.now()},
     )
     assert v_res.status_code == 200
     assert v_res.json()["is_admin"] is False
@@ -184,7 +286,9 @@ def test_brute_force_lockout():
         "consent_data_use": True,
     }
     s_res = client.post("/api/v1/auth/signup", json=signup_payload)
-    token = s_res.json()["email_verification_token"]
+    assert s_res.status_code == 200
+    user = USERS_DB[email]
+    token = user.email_verification_token
     client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
 
     # 2. Submit 5 wrong passwords

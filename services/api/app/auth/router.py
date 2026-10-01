@@ -93,6 +93,7 @@ class ResendVerificationRequest(BaseModel):
 
 class Verify2FARequest(BaseModel):
     email: EmailStr
+    password: str = Field(..., description="Account password to verify identity")
     totp_token: str = Field(..., min_length=6, max_length=6, description="6-digit TOTP code")
 
 
@@ -131,6 +132,7 @@ async def signup(payload: SignupRequest):
     Register new account.
     Enforces SEBI risk disclosure consent, generates TOTP 2FA secret, and dispatches email verification.
     Security: Administrator privileges can NEVER be granted through public signup.
+    Tokens are dispatched by email and NEVER returned in API responses.
     """
     if not payload.consent_risk_disclosure or not payload.consent_terms or not payload.consent_data_use:
         raise HTTPException(
@@ -164,14 +166,15 @@ async def signup(payload: SignupRequest):
     user.email_verification_token = verification_token
     user.email_verification_sent_at = datetime.now(timezone.utc)
     USERS_DB[email_clean] = user
-    logger.info(f"New user registered: {email_clean} (ID: {user_id}, Admin: False, Email Verified: False)")
+    logger.info(
+        f"[EMAIL SERVICE - DEV DISPATCH] Email verification link sent to {email_clean}: token={verification_token}"
+    )
 
     return {
         "status": "success",
-        "message": "User registered. Please verify your email before 2FA activation.",
+        "message": "User registered. Verification instructions sent to your email. Please verify within 24 hours.",
         "user_id": user_id,
         "email": email_clean,
-        "email_verification_token": verification_token,
         "totp_secret": totp_secret,
         "totp_uri": totp_uri,
     }
@@ -181,6 +184,7 @@ async def signup(payload: SignupRequest):
 async def verify_email(payload: VerifyEmailRequest):
     """
     Verify user's email address using registration token.
+    Enforces a strict 24-hour expiration window.
     """
     email_clean = payload.email.strip().lower()
     user = USERS_DB.get(email_clean)
@@ -196,8 +200,18 @@ async def verify_email(payload: VerifyEmailRequest):
             detail="Invalid or expired email verification token.",
         )
 
+    # Enforce 24-hour expiration window
+    if user.email_verification_sent_at:
+        elapsed_seconds = (datetime.now(timezone.utc) - user.email_verification_sent_at).total_seconds()
+        if elapsed_seconds > 86400: # 24 hours
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email verification token has expired after 24 hours. Please request a new verification link.",
+            )
+
     user.is_email_verified = True
     user.email_verification_token = None
+    user.email_verification_sent_at = None
     logger.info(f"Email successfully verified for user: {email_clean}")
 
     return {
@@ -211,7 +225,7 @@ async def verify_email(payload: VerifyEmailRequest):
 @router.post("/resend-verification")
 async def resend_verification(payload: ResendVerificationRequest):
     """
-    Regenerate and resend email verification token.
+    Regenerate and resend email verification token. Token is not returned in API response.
     """
     email_clean = payload.email.strip().lower()
     user = USERS_DB.get(email_clean)
@@ -223,13 +237,14 @@ async def resend_verification(payload: ResendVerificationRequest):
 
     user.email_verification_token = secrets.token_hex(16)
     user.email_verification_sent_at = datetime.now(timezone.utc)
-    logger.info(f"Verification token regenerated for user: {email_clean}")
+    logger.info(
+        f"[EMAIL SERVICE - DEV DISPATCH] Resent verification link to {email_clean}: token={user.email_verification_token}"
+    )
 
     return {
         "status": "success",
-        "message": "Verification token regenerated.",
+        "message": "Verification instructions resent to your email. Please verify within 24 hours.",
         "email": email_clean,
-        "email_verification_token": user.email_verification_token,
     }
 
 
@@ -237,25 +252,50 @@ async def resend_verification(payload: ResendVerificationRequest):
 async def verify_2fa(payload: Verify2FARequest):
     """
     Verify 6-digit TOTP token to activate 2FA and receive authenticated JWT session.
-    Requires verified email address.
+    Security: Enforces account password check and brute-force lockout. Requires verified email.
     """
     email_clean = payload.email.strip().lower()
+
+    # 1. Check lockout status
+    locked, remaining = security_service.is_locked_out(email_clean)
+    if locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Account temporarily locked due to multiple failed attempts. Try again in {remaining} seconds.",
+        )
+
     user = USERS_DB.get(email_clean)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        security_service.record_failed_attempt(email_clean)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    # 2. Check email verified
     if not user.is_email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email is not verified. Please verify your email before proceeding.",
         )
 
+    # 3. Check password
+    pw_matches = security_service.verify_password(user.password_hash, payload.password)
+    if not pw_matches:
+        count = security_service.record_failed_attempt(email_clean)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid password. Attempt {count}/5 before lockout.",
+        )
+
+    # 4. Check TOTP token
     is_valid = security_service.verify_totp(user.totp_secret, payload.totp_token)
     if not is_valid:
+        count = security_service.record_failed_attempt(email_clean)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid 6-digit TOTP code. Ensure your device clock is synchronized.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid 2FA code. Attempt {count}/5 before lockout.",
         )
+
+    # Reset failed attempts on success
+    security_service.reset_failed_attempts(email_clean)
 
     user.is_2fa_enabled = True
     token = security_service.create_access_token(

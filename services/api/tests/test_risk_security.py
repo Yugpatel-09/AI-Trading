@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.app.auth.router import seed_admin_user
+from services.api.app.auth.router import USERS_DB, seed_admin_user
 from services.api.app.auth.security import security_service
 from services.api.app.core.config import settings
 from services.api.app.main import app
@@ -32,7 +33,8 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
     signup_data = signup_res.json()
     secret = signup_data["totp_secret"]
     user_id = signup_data["user_id"]
-    email_token = signup_data["email_verification_token"]
+    email_clean = email.strip().lower()
+    email_token = USERS_DB[email_clean].email_verification_token
 
     # 1. Verify email
     v_res = client.post(
@@ -41,12 +43,12 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
     )
     assert v_res.status_code == 200, v_res.text
 
-    # 2. Verify 2FA to activate session
+    # 2. Verify 2FA to activate session (requires password check)
     totp = pyotp.TOTP(secret)
     token = totp.now()
     verify_res = client.post(
         "/api/v1/auth/verify-2fa",
-        json={"email": email, "totp_token": token},
+        json={"email": email, "password": password, "totp_token": token},
     )
     assert verify_res.status_code == 200
     access_token = verify_res.json()["access_token"]
@@ -73,12 +75,17 @@ def login_admin():
 
 @pytest.fixture(autouse=True)
 def reset_system_state():
-    """Ensure kill switch is reset and heartbeats are recorded before every test."""
+    """Ensure kill switch is reset, heartbeats recorded, and market hours active during tests."""
     global_kill_switch.deactivate_global()
     global_kill_switch._user_switches.clear()
     for sym in ["RELIANCE", "NIFTY", "TCS", "HDFCBANK"]:
         global_watchdog.record_heartbeat(sym)
-    yield
+    ist = timezone(timedelta(hours=5, minutes=30))
+    mock_market_time = datetime(2026, 10, 1, 10, 30, 0, tzinfo=ist)
+    with patch("services.risk_guard.guard.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_market_time
+        mock_dt.side_effect = None
+        yield
     global_kill_switch.deactivate_global()
     global_kill_switch._user_switches.clear()
 
@@ -370,3 +377,44 @@ def test_user_risk_settings_guardrails():
     assert good_res.status_code == 200
     assert good_res.json()["max_daily_loss_inr"] == 5000.0
     assert good_res.json()["max_loss_per_trade_inr"] == 1500.0
+
+
+def test_server_side_enforces_trading_hours():
+    """Security Check: Server-side always enforces NSE trading hours regardless of client payload."""
+    user_id, headers = register_and_login_user("trading_hours_trader@tradeforge.io")
+    payload = {
+        "proposal": {
+            "idempotency_key": "sec_test_after_hours_001",
+            "user_id": user_id,
+            "signal": {
+                "id": "sig_hours_001",
+                "strategy_type": "SCALPER_1M",
+                "symbol": "RELIANCE",
+                "side": "BUY",
+                "timeframe": "1m",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "entry_price": 2500.0,
+                "stop_loss": 2490.0,
+                "target": 2520.0,
+                "regime": "TRENDING_BULLISH",
+                "quality_score": 0.85,
+                "expected_net_gain_pct": 0.5,
+                "reason": "Test trading hours cutoff",
+            },
+            "requested_quantity": 50,
+            "mode": "PAPER",
+            "broker": "PAPER",
+        },
+        "current_ltp": 2500.0,
+    }
+
+    # Simulate post square-off cutoff time (15:20 IST)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    post_cutoff = datetime(2026, 10, 1, 15, 20, 0, tzinfo=ist)
+    with patch("services.risk_guard.guard.datetime") as mock_dt:
+        mock_dt.now.return_value = post_cutoff
+        res = client.post("/api/v1/risk/validate", json=payload, headers=headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["approved"] is False
+        assert any("15:15:00 IST" in v for v in data["violations"])

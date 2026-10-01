@@ -40,7 +40,7 @@ class RiskGuard:
         user_settings: UserRiskSettings,
         current_ltp: float,
         current_time: Optional[datetime] = None,
-        enforce_trading_hours: bool = False,
+        enforce_trading_hours: bool = True,
     ) -> RiskCheckResult:
         """
         Execute exhaustive pre-trade verification.
@@ -64,6 +64,7 @@ class RiskGuard:
             )
 
         # 3. Market Hours & 15:15 IST Square-Off Check
+        # Enforce trading hours server-side.
         if enforce_trading_hours:
             ist_tz = timezone(timedelta(hours=5, minutes=30))
             now_ist = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(ist_tz)
@@ -83,10 +84,9 @@ class RiskGuard:
                 )
 
         # 4. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
+        # Note: Idempotency key is recorded strictly ONLY after an order is approved.
         if proposal.idempotency_key in self._processed_idempotency_keys:
             violations.append(f"Duplicate order submission rejected (Key: {proposal.idempotency_key})")
-        else:
-            self._processed_idempotency_keys.add(proposal.idempotency_key)
 
         # 5. Daily Trade Cap Check
         current_trade_count = self._user_daily_trade_count.get(user_id, 0)
@@ -166,6 +166,10 @@ class RiskGuard:
             )
 
         approved = len(violations) == 0
+        if approved:
+            # Rule 8: Record idempotency key strictly after order is approved
+            self._processed_idempotency_keys.add(proposal.idempotency_key)
+
         reason = "Risk checks passed successfully" if approved else "; ".join(violations)
 
         return RiskCheckResult(

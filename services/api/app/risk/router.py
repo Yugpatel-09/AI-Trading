@@ -22,14 +22,10 @@ router = APIRouter(prefix="/api/v1/risk", tags=["Risk Guard"])
 class RiskValidateRequest(BaseModel):
     """
     Pre-trade validation request.
-    Security: User limits are strictly loaded from server state to prevent client manipulation.
+    Security: User limits and trading hours are strictly loaded and enforced server-side.
     """
     proposal: OrderProposal
     current_ltp: float = Field(..., gt=0.0, description="Current Last Traded Price")
-    enforce_trading_hours: bool = Field(
-        default=False,
-        description="Whether to enforce NSE 09:20-15:00 window and 15:15 IST auto square-off cutoff",
-    )
 
 
 class KillSwitchActivateRequest(BaseModel):
@@ -50,7 +46,7 @@ async def validate_order_risk(
 ):
     """
     Standalone pre-trade risk verification endpoint.
-    Requires authentication. Limits loaded server-side per Non-Negotiable Rule 1.
+    Requires authentication. Limits loaded and trading hours enforced server-side per Non-Negotiable Rule 1.
     """
     if payload.proposal.user_id != current_user.user_id:
         raise HTTPException(
@@ -65,7 +61,7 @@ async def validate_order_risk(
         proposal=payload.proposal,
         user_settings=user_settings,
         current_ltp=payload.current_ltp,
-        enforce_trading_hours=payload.enforce_trading_hours,
+        enforce_trading_hours=True,
     )
     return result
 

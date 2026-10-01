@@ -1,5 +1,4 @@
 import base64
-import os
 from typing import List, Optional
 
 from pydantic import Field
@@ -8,8 +7,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     """Platform configuration loaded from environment."""
-    ENVIRONMENT: str = Field(default="development")
-    DEBUG: bool = Field(default=True)
+    # Production is the secure default: only explicit development/test relaxes secrets check
+    ENVIRONMENT: str = Field(default="production")
+    DEBUG: bool = Field(default=False)
     LOG_LEVEL: str = Field(default="INFO")
 
     # API
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
             missing.append("SECRET_KEY (must be set to a secure random string of at least 32 characters)")
 
         # 2. Vault key
-        vault_key = self.ENCRYPTION_KEY_32BYTES_BASE64 or os.environ.get("ENCRYPTION_KEY_32BYTES_BASE64")
+        vault_key = self.ENCRYPTION_KEY_32BYTES_BASE64
         if not vault_key:
             missing.append("ENCRYPTION_KEY_32BYTES_BASE64 (32-byte AES-256 base64-encoded key is missing)")
         else:

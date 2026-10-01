@@ -68,6 +68,8 @@ def test_dead_feed_triggers_halt(test_setup):
 def test_duplicate_orders_blocked_by_idempotency(test_setup):
     """Failure Drill 2: Network retry with same idempotency token is rejected."""
     guard, ks, wd, user_settings, sig = test_setup
+    ist = timezone(timedelta(hours=5, minutes=30))
+    market_time = datetime(2026, 10, 1, 10, 30, 0, tzinfo=ist)
     proposal = OrderProposal(
         idempotency_key="idemp_drill_retry_101",
         user_id=user_settings.user_id,
@@ -75,11 +77,11 @@ def test_duplicate_orders_blocked_by_idempotency(test_setup):
         requested_quantity=20,
         mode=TradingMode.PAPER,
     )
-    res1 = guard.validate_proposal(proposal, user_settings, current_ltp=22000.0)
+    res1 = guard.validate_proposal(proposal, user_settings, current_ltp=22000.0, current_time=market_time)
     assert res1.approved is True
 
     # Immediate duplicate re-submission
-    res2 = guard.validate_proposal(proposal, user_settings, current_ltp=22000.0)
+    res2 = guard.validate_proposal(proposal, user_settings, current_ltp=22000.0, current_time=market_time)
     assert res2.approved is False
     assert any("duplicate" in v.lower() for v in res2.violations)
 
