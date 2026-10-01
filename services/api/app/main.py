@@ -9,26 +9,21 @@ from pydantic import BaseModel, Field
 from tradeforge_shared.costs import IndianCostCalculator
 from tradeforge_shared.enums import TradingMode
 from tradeforge_shared.schemas import (
-    OrderProposal,
-    RiskCheckResult,
     SystemHealthStatus,
-    UserRiskSettings,
 )
 
 from services.api.app.auth.router import router as auth_router
 from services.api.app.brokers.router import router as broker_router
 from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
+from services.api.app.risk import (
+    global_kill_switch,
+    global_watchdog,
+    risk_router,
+)
 from services.api.app.strategies.router import router as strategy_router
 from services.api.app.ws.router import router as ws_router
-from services.risk_guard.guard import RiskGuard
-from services.risk_guard.kill_switch import KillSwitch
-from services.risk_guard.watchdog import FeedWatchdog
 
-# Initialize singleton Risk Guard & Kill Switch for the API process
-global_kill_switch = KillSwitch()
-global_watchdog = FeedWatchdog()
-global_risk_guard = RiskGuard(kill_switch=global_kill_switch, watchdog=global_watchdog)
 cost_calculator = IndianCostCalculator()
 
 @asynccontextmanager
@@ -70,6 +65,7 @@ app.include_router(auth_router)
 app.include_router(broker_router)
 app.include_router(strategy_router)
 app.include_router(ws_router)
+app.include_router(risk_router)
 
 # ------------------------------------------------------------------------------
 # Health & Telemetry Endpoints
@@ -127,52 +123,3 @@ async def calculate_trade_costs(payload: CostCalculationRequest):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-# ------------------------------------------------------------------------------
-# Risk Guard Pre-Trade Verification Endpoint
-# ------------------------------------------------------------------------------
-class RiskValidateRequest(BaseModel):
-    proposal: OrderProposal
-    user_settings: UserRiskSettings
-    current_ltp: float
-
-@app.post("/api/v1/risk/validate", response_model=RiskCheckResult, tags=["Risk Guard"])
-async def validate_order_risk(payload: RiskValidateRequest):
-    """
-    Standalone pre-trade risk check.
-    Enforces Non-negotiable Rule 1: Every order must pass Risk Guard.
-    """
-    result = global_risk_guard.validate_proposal(
-        proposal=payload.proposal,
-        user_settings=payload.user_settings,
-        current_ltp=payload.current_ltp,
-    )
-    return result
-
-# ------------------------------------------------------------------------------
-# Emergency Kill Switch Control
-# ------------------------------------------------------------------------------
-class KillSwitchRequest(BaseModel):
-    reason: str = "Manual Emergency Halt"
-    user_id: str | None = None
-
-@app.post("/api/v1/risk/kill-switch/activate", tags=["Risk Guard"])
-async def activate_kill_switch(payload: KillSwitchRequest):
-    """Trigger emergency trading halt."""
-    if payload.user_id:
-        global_kill_switch.activate_user(payload.user_id, payload.reason)
-        logger.warning(f"Kill switch activated for user {payload.user_id}: {payload.reason}")
-    else:
-        global_kill_switch.activate_global(payload.reason)
-        logger.critical(f"GLOBAL KILL SWITCH ACTIVATED: {payload.reason}")
-    return global_kill_switch.status()
-
-@app.post("/api/v1/risk/kill-switch/deactivate", tags=["Risk Guard"])
-async def deactivate_kill_switch(user_id: str | None = None):
-    """Deactivate emergency trading halt."""
-    if user_id:
-        global_kill_switch.deactivate_user(user_id)
-        logger.info(f"Kill switch deactivated for user {user_id}")
-    else:
-        global_kill_switch.deactivate_global()
-        logger.info("Global kill switch deactivated.")
-    return global_kill_switch.status()

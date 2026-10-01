@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set
 
 from tradeforge_shared.enums import TradingMode
@@ -25,6 +25,7 @@ class RiskGuard:
         self._user_daily_pnl: Dict[str, float] = {}
         self._user_open_positions: Dict[str, int] = {}
         self._user_consecutive_losses: Dict[str, int] = {}
+        self._user_daily_trade_count: Dict[str, int] = {}
 
         # Platform-level invariants (cannot be overridden by user)
         self.blocked_symbols: Set[str] = {
@@ -39,6 +40,7 @@ class RiskGuard:
         user_settings: UserRiskSettings,
         current_ltp: float,
         current_time: Optional[datetime] = None,
+        enforce_trading_hours: bool = False,
     ) -> RiskCheckResult:
         """
         Execute exhaustive pre-trade verification.
@@ -53,23 +55,51 @@ class RiskGuard:
         if self.kill_switch.is_active_for_user(user_id):
             violations.append("Kill switch is active. Trading is halted.")
 
-        # Watchdog data feed check
-        if signal.symbol in self.watchdog._last_tick_time:
-            is_fresh, delay_ms = self.watchdog.is_feed_fresh(signal.symbol, current_time=now)
-            if not is_fresh:
-                violations.append(f"Market data feed is stale ({delay_ms}ms > {self.watchdog.max_staleness_ms}ms). Trading halted.")
+        # 2. Watchdog data feed check (Market data feed must be fresh and within max staleness)
+        is_fresh, delay_ms = self.watchdog.is_feed_fresh(signal.symbol, current_time=now)
+        if not is_fresh:
+            violations.append(
+                f"Market data feed is stale or unavailable for {signal.symbol} "
+                f"({delay_ms}ms > {self.watchdog.max_staleness_ms}ms). Trading halted."
+            )
 
-        # 2. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
+        # 3. Market Hours & 15:15 IST Square-Off Check
+        if enforce_trading_hours:
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            now_ist = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(ist_tz)
+            current_time_str = now_ist.strftime("%H:%M:%S")
+
+            if current_time_str >= "15:15:00":
+                violations.append(
+                    f"Intraday square-off cutoff reached: No new entries allowed after 15:15:00 IST (Current IST: {current_time_str})."
+                )
+            elif current_time_str < user_settings.trading_start_time_ist:
+                violations.append(
+                    f"Trading blocked: Current time {current_time_str} IST is before strategy start window {user_settings.trading_start_time_ist} IST."
+                )
+            elif current_time_str > user_settings.trading_end_time_ist:
+                violations.append(
+                    f"Trading blocked: Current time {current_time_str} IST is after strategy cutoff window {user_settings.trading_end_time_ist} IST."
+                )
+
+        # 4. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
         if proposal.idempotency_key in self._processed_idempotency_keys:
             violations.append(f"Duplicate order submission rejected (Key: {proposal.idempotency_key})")
         else:
             self._processed_idempotency_keys.add(proposal.idempotency_key)
 
-        # 3. Paper mode enforcement (Rule 2: Paper mode is default)
+        # 5. Daily Trade Cap Check
+        current_trade_count = self._user_daily_trade_count.get(user_id, 0)
+        if current_trade_count >= user_settings.max_daily_trades:
+            violations.append(
+                f"Daily trade limit reached: {current_trade_count}/{user_settings.max_daily_trades} trades executed today."
+            )
+
+        # 6. Paper mode enforcement (Rule 2: Paper mode is default)
         if proposal.mode == TradingMode.AUTO and user_settings.mode != TradingMode.AUTO:
             violations.append("Live Auto mode is not enabled for this user. 2FA verification required.")
 
-        # 4. Mandatory Protective Stop Check (Rule 7)
+        # 7. Mandatory Protective Stop Check (Rule 7)
         if not signal.stop_loss or signal.stop_loss <= 0:
             violations.append("Protective stop-loss is missing or invalid. Orders without stops are blocked.")
 
@@ -77,35 +107,35 @@ class RiskGuard:
         if stop_distance <= 0:
             violations.append("Stop-loss price is identical to entry price.")
 
-        # 5. Fat-finger Price Band Check
+        # 8. Fat-finger Price Band Check
         price_deviation = abs(signal.entry_price - current_ltp) / current_ltp
         if price_deviation > self.max_price_deviation_pct:
             violations.append(
                 f"Fat-finger check failed: Entry price deviates {price_deviation*100:.2f}% from LTP ({current_ltp})"
             )
 
-        # 6. Instrument Whitelist & Blocklist
+        # 9. Instrument Whitelist & Blocklist
         if signal.symbol in self.blocked_symbols:
             violations.append(f"Symbol {signal.symbol} is on platform risk blocklist.")
 
         if user_settings.allowed_instruments and signal.symbol not in user_settings.allowed_instruments:
             violations.append(f"Symbol {signal.symbol} is not in user allowed instruments list.")
 
-        # 7. Consecutive Loss Auto-Stop
+        # 10. Consecutive Loss Auto-Stop
         current_losses = self._user_consecutive_losses.get(user_id, 0)
         if current_losses >= user_settings.auto_stop_after_consecutive_losses:
             violations.append(
                 f"Auto-stop triggered: {current_losses} consecutive losses reached for today."
             )
 
-        # 8. Max Open Positions Check
+        # 11. Max Open Positions Check
         current_positions = self._user_open_positions.get(user_id, 0)
         if current_positions >= user_settings.max_open_positions:
             violations.append(
                 f"Max open positions limit ({user_settings.max_open_positions}) reached."
             )
 
-        # 9. Sizing & Loss per Trade Check
+        # 12. Sizing & Loss per Trade Check
         # Rupee Risk = quantity * stop_distance
         calculated_risk = proposal.requested_quantity * stop_distance
         order_turnover = proposal.requested_quantity * signal.entry_price
@@ -128,7 +158,7 @@ class RiskGuard:
                 adjusted_quantity = max_allowed_qty
                 calculated_risk = adjusted_quantity * stop_distance
 
-        # 10. Daily Loss Limit Check
+        # 13. Daily Loss Limit Check
         current_daily_pnl = self._user_daily_pnl.get(user_id, 0.0)
         if current_daily_pnl <= -user_settings.max_daily_loss_inr:
             violations.append(
@@ -145,6 +175,10 @@ class RiskGuard:
             calculated_risk_inr=calculated_risk if approved else 0.0,
             violations=violations,
         )
+
+    def record_trade_execution(self, user_id: str):
+        """Increment daily executed trade count."""
+        self._user_daily_trade_count[user_id] = self._user_daily_trade_count.get(user_id, 0) + 1
 
     def record_trade_completion(self, user_id: str, net_pnl: float):
         """Update user intraday ledger after trade closure."""

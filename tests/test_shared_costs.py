@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from tradeforge_shared.costs import IndianCostCalculator
@@ -58,7 +58,7 @@ def test_signal_requires_protective_stop():
             symbol="RELIANCE",
             side=OrderSide.BUY,
             timeframe="1m",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             entry_price=2500.0,
             # stop_loss missing
             target=2515.0,

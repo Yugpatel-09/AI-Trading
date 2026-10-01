@@ -5,9 +5,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from services.api.app.auth.security import security_service
+from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication & 2FA"])
+
 
 # In-memory user store for development (isolated per user)
 class UserRecord:
@@ -18,12 +20,14 @@ class UserRecord:
         password_hash: str,
         totp_secret: str,
         is_2fa_enabled: bool = False,
+        is_admin: bool = False,
     ):
         self.user_id = user_id
         self.email = email
         self.password_hash = password_hash
         self.totp_secret = totp_secret
         self.is_2fa_enabled = is_2fa_enabled
+        self.is_admin = is_admin
         self.live_trading_enabled: bool = False
         self.connected_brokers: list[str] = ["PAPER"]
 
@@ -89,6 +93,7 @@ async def signup(payload: SignupRequest):
     pw_hash = security_service.hash_password(payload.password)
     totp_secret = security_service.generate_totp_secret()
     totp_uri = security_service.get_totp_uri(payload.email, totp_secret)
+    is_admin = payload.email.strip().lower() == settings.ADMIN_EMAIL.strip().lower()
 
     user = UserRecord(
         user_id=user_id,
@@ -96,9 +101,10 @@ async def signup(payload: SignupRequest):
         password_hash=pw_hash,
         totp_secret=totp_secret,
         is_2fa_enabled=False,
+        is_admin=is_admin,
     )
     USERS_DB[payload.email] = user
-    logger.info(f"New user registered: {payload.email} (ID: {user_id})")
+    logger.info(f"New user registered: {payload.email} (ID: {user_id}, Admin: {is_admin})")
 
     return {
         "status": "success",
@@ -212,6 +218,7 @@ async def get_me(user: UserRecord = Depends(get_current_user)):
     return {
         "user_id": user.user_id,
         "email": user.email,
+        "is_admin": user.is_admin,
         "is_2fa_enabled": user.is_2fa_enabled,
         "live_trading_enabled": user.live_trading_enabled,
         "connected_brokers": user.connected_brokers,

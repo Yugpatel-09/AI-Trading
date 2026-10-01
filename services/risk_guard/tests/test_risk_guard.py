@@ -9,7 +9,11 @@ from services.risk_guard.guard import RiskGuard
 
 @pytest.fixture
 def risk_guard():
-    return RiskGuard()
+    rg = RiskGuard()
+    rg.watchdog.record_heartbeat("RELIANCE")
+    rg.watchdog.record_heartbeat("NIFTY")
+    rg.watchdog.record_heartbeat("SUZLON")
+    return rg
 
 @pytest.fixture
 def default_user_settings():
@@ -19,9 +23,12 @@ def default_user_settings():
         max_loss_per_trade_inr=1000.0,
         max_daily_loss_inr=3000.0,
         max_open_positions=2,
+        max_daily_trades=3,
         mode=TradingMode.PAPER,
         auto_stop_after_consecutive_losses=3,
         allowed_instruments=["NIFTY", "RELIANCE", "TCS"],
+        trading_start_time_ist="09:20:00",
+        trading_end_time_ist="15:00:00",
     )
 
 @pytest.fixture
@@ -142,3 +149,81 @@ def test_risk_guard_auto_stops_after_3_consecutive_losses(risk_guard, default_us
     result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
     assert result.approved is False
     assert any("consecutive losses" in v for v in result.violations)
+
+def test_risk_guard_enforces_daily_trade_cap(risk_guard, default_user_settings, sample_signal):
+    user_id = default_user_settings.user_id
+    # Default settings max_daily_trades is 3
+    risk_guard.record_trade_execution(user_id)
+    risk_guard.record_trade_execution(user_id)
+    risk_guard.record_trade_execution(user_id)
+
+    proposal = OrderProposal(
+        idempotency_key="idem_trade_cap",
+        user_id=user_id,
+        signal=sample_signal,
+        requested_quantity=10,
+        mode=TradingMode.PAPER,
+    )
+    result = risk_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    assert result.approved is False
+    assert any("Daily trade limit reached" in v for v in result.violations)
+
+def test_risk_guard_rejects_stale_or_missing_feed(default_user_settings, sample_signal):
+    # Risk guard with an empty watchdog (no ticks registered for RELIANCE)
+    empty_guard = RiskGuard()
+    proposal = OrderProposal(
+        idempotency_key="idem_no_feed",
+        user_id="usr_test_123",
+        signal=sample_signal,
+        requested_quantity=10,
+        mode=TradingMode.PAPER,
+    )
+    result = empty_guard.validate_proposal(proposal, default_user_settings, current_ltp=2500.0)
+    assert result.approved is False
+    assert any("Market data feed is stale or unavailable" in v for v in result.violations)
+
+def test_risk_guard_rejects_after_15_15_ist(risk_guard, default_user_settings, sample_signal):
+    from datetime import timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    # Mock time at 15:20 IST (post square-off cutoff)
+    post_cutoff_time = datetime(2026, 10, 1, 15, 20, 0, tzinfo=ist)
+
+    proposal = OrderProposal(
+        idempotency_key="idem_late_entry",
+        user_id="usr_test_123",
+        signal=sample_signal,
+        requested_quantity=10,
+        mode=TradingMode.PAPER,
+    )
+    result = risk_guard.validate_proposal(
+        proposal,
+        default_user_settings,
+        current_ltp=2500.0,
+        current_time=post_cutoff_time,
+        enforce_trading_hours=True,
+    )
+    assert result.approved is False
+    assert any("15:15:00 IST" in v for v in result.violations)
+
+def test_risk_guard_rejects_before_market_window(risk_guard, default_user_settings, sample_signal):
+    from datetime import timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    # Mock time at 09:10 IST (before start window 09:20 IST)
+    early_time = datetime(2026, 10, 1, 9, 10, 0, tzinfo=ist)
+
+    proposal = OrderProposal(
+        idempotency_key="idem_early_entry",
+        user_id="usr_test_123",
+        signal=sample_signal,
+        requested_quantity=10,
+        mode=TradingMode.PAPER,
+    )
+    result = risk_guard.validate_proposal(
+        proposal,
+        default_user_settings,
+        current_ltp=2500.0,
+        current_time=early_time,
+        enforce_trading_hours=True,
+    )
+    assert result.approved is False
+    assert any("before strategy start window" in v for v in result.violations)

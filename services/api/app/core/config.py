@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = Field(default="dev_secret_key_needs_replacement_in_production_32chars")
     JWT_ALGORITHM: str = Field(default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60)
+    ADMIN_EMAIL: str = Field(default="admin@tradeforge.io")
 
     # Database & Redis
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./tradeforge_dev.db")

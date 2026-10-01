@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -109,4 +109,4 @@ class SystemHealthStatus(BaseModel):
     open_positions_count: int = 0
     todays_realized_pnl_inr: float = 0.0
     active_mode: TradingMode = TradingMode.PAPER
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -13,6 +13,7 @@ from services.risk_guard.watchdog import FeedWatchdog
 def test_setup():
     ks = KillSwitch()
     wd = FeedWatchdog(max_staleness_ms=5000)
+    wd.record_heartbeat("NIFTY")
     guard = RiskGuard(kill_switch=ks, watchdog=wd)
     user_settings = UserRiskSettings(
         user_id="drill_user_1",
@@ -51,6 +52,18 @@ def test_dead_feed_triggers_halt(test_setup):
     is_fresh, delay = wd.is_feed_fresh("NIFTY")
     assert is_fresh is False
     assert delay >= 5000
+
+    # Risk Guard must reject orders when feed is stale
+    proposal = OrderProposal(
+        idempotency_key="idemp_stale_feed",
+        user_id=user_settings.user_id,
+        signal=sig,
+        requested_quantity=10,
+        mode=TradingMode.PAPER,
+    )
+    res = guard.validate_proposal(proposal, user_settings, current_ltp=22000.0)
+    assert res.approved is False
+    assert any("stale or unavailable" in v for v in res.violations)
 
 def test_duplicate_orders_blocked_by_idempotency(test_setup):
     """Failure Drill 2: Network retry with same idempotency token is rejected."""
