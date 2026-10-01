@@ -10,6 +10,7 @@ from tradeforge_shared.schemas import (
 
 from services.api.app.auth.router import UserRecord, get_current_user
 from services.api.app.core.logging import logger
+from services.api.app.core.security_middleware import enforce_rate_limit
 from services.api.app.risk.service import global_kill_switch, global_risk_guard
 from services.api.app.risk.storage import (
     get_user_risk_settings,
@@ -48,6 +49,7 @@ async def validate_order_risk(
     Standalone pre-trade risk verification endpoint.
     Requires authentication. Limits loaded and trading hours enforced server-side per Non-Negotiable Rule 1.
     """
+    enforce_rate_limit(f"risk:validate:{current_user.user_id}", max_requests=100, window_seconds=60)
     if payload.proposal.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -82,6 +84,7 @@ async def set_my_risk_settings(
     """
     Update authenticated user's risk settings within platform hard ceilings.
     """
+    enforce_rate_limit(f"risk:settings:{current_user.user_id}", max_requests=30, window_seconds=60)
     if payload.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -101,6 +104,7 @@ async def activate_kill_switch(
     - Regular users can halt only their own account.
     - Platform-wide GLOBAL halt requires administrator privileges.
     """
+    enforce_rate_limit(f"risk:killswitch:{current_user.user_id}", max_requests=30, window_seconds=60)
     scope = payload.scope.upper()
     if scope == "GLOBAL":
         if not current_user.is_admin:
@@ -138,6 +142,7 @@ async def deactivate_kill_switch(
     - Global deactivation requires administrator privileges.
     - User unhalt requires the authenticated user or an admin.
     """
+    enforce_rate_limit(f"risk:killswitch:{current_user.user_id}", max_requests=30, window_seconds=60)
     scope = payload.scope.upper()
     if scope == "GLOBAL":
         if not current_user.is_admin:

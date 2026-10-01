@@ -17,6 +17,7 @@ from services.api.app.auth.router import seed_admin_user
 from services.api.app.brokers.router import router as broker_router
 from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
+from services.api.app.core.security_middleware import CSRFMiddleware, SecurityHeadersMiddleware
 from services.api.app.risk import (
     global_kill_switch,
     global_watchdog,
@@ -46,12 +47,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS Middleware
+# Security Headers & CSRF Middlewares
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFMiddleware)
+
+# CORS Middleware (Strict allow-list from settings)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
 )
 

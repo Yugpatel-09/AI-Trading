@@ -1,0 +1,85 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg16
+    container_name: tradeforge_db_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB required}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - timescale_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tradeforge_redis_prod
+    restart: always
+    command: redis-server --requirepass "${REDIS_PASSWORD:?REDIS_PASSWORD required}"
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: tradeforge_api_prod
+    restart: always
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:?ALLOWED_ORIGINS required}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY required}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:?ADMIN_EMAIL required}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD required}
+      - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:?ADMIN_TOTP_SECRET required}
+      - ENCRYPTION_KEY_32BYTES_BASE64=${ENCRYPTION_KEY_32BYTES_BASE64:?ENCRYPTION_KEY_32BYTES_BASE64 required}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL required}
+      - REDIS_URL=${REDIS_URL:?REDIS_URL required}
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-smtp}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-noreply@tradeforge.io}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: tradeforge_web_prod
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL required}
+      - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:?NEXT_PUBLIC_WS_URL required}
+
+volumes:
+  timescale_prod_data:
+  redis_prod_data:

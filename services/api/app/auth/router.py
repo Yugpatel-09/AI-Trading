@@ -3,14 +3,24 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
+from services.api.app.auth.email import get_email_sender
 from services.api.app.auth.security import security_service
 from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
+from services.api.app.core.security_middleware import enforce_rate_limit
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication & 2FA"])
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP respecting reverse proxy headers."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
 
 
 # In-memory user store for development (isolated per user)
@@ -127,13 +137,14 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> UserRecord:
 
 
 @router.post("/signup")
-async def signup(payload: SignupRequest):
+async def signup(payload: SignupRequest, request: Request):
     """
     Register new account.
     Enforces SEBI risk disclosure consent, generates TOTP 2FA secret, and dispatches email verification.
     Security: Administrator privileges can NEVER be granted through public signup.
     Tokens are dispatched by email and NEVER returned in API responses.
     """
+    enforce_rate_limit(f"auth:signup:{get_client_ip(request)}", max_requests=15, window_seconds=60)
     if not payload.consent_risk_disclosure or not payload.consent_terms or not payload.consent_data_use:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -166,9 +177,7 @@ async def signup(payload: SignupRequest):
     user.email_verification_token = verification_token
     user.email_verification_sent_at = datetime.now(timezone.utc)
     USERS_DB[email_clean] = user
-    logger.info(
-        f"[EMAIL SERVICE - DEV DISPATCH] Email verification link sent to {email_clean}: token={verification_token}"
-    )
+    get_email_sender().send_verification_email(email_clean, verification_token)
 
     return {
         "status": "success",
@@ -223,10 +232,11 @@ async def verify_email(payload: VerifyEmailRequest):
 
 
 @router.post("/resend-verification")
-async def resend_verification(payload: ResendVerificationRequest):
+async def resend_verification(payload: ResendVerificationRequest, request: Request):
     """
     Regenerate and resend email verification token. Token is not returned in API response.
     """
+    enforce_rate_limit(f"auth:resend:{get_client_ip(request)}", max_requests=10, window_seconds=60)
     email_clean = payload.email.strip().lower()
     user = USERS_DB.get(email_clean)
     if not user:
@@ -237,9 +247,7 @@ async def resend_verification(payload: ResendVerificationRequest):
 
     user.email_verification_token = secrets.token_hex(16)
     user.email_verification_sent_at = datetime.now(timezone.utc)
-    logger.info(
-        f"[EMAIL SERVICE - DEV DISPATCH] Resent verification link to {email_clean}: token={user.email_verification_token}"
-    )
+    get_email_sender().send_verification_email(email_clean, user.email_verification_token)
 
     return {
         "status": "success",
@@ -249,11 +257,12 @@ async def resend_verification(payload: ResendVerificationRequest):
 
 
 @router.post("/verify-2fa")
-async def verify_2fa(payload: Verify2FARequest):
+async def verify_2fa(payload: Verify2FARequest, request: Request):
     """
     Verify 6-digit TOTP token to activate 2FA and receive authenticated JWT session.
     Security: Enforces account password check and brute-force lockout. Requires verified email.
     """
+    enforce_rate_limit(f"auth:2fa:{get_client_ip(request)}", max_requests=20, window_seconds=60)
     email_clean = payload.email.strip().lower()
 
     # 1. Check lockout status
@@ -317,11 +326,12 @@ async def verify_2fa(payload: Verify2FARequest):
 
 
 @router.post("/login")
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
     """
     Authenticate user using Argon2 password and mandatory TOTP 2FA.
     Enforces brute-force lockout after 5 failed attempts and requires verified email.
     """
+    enforce_rate_limit(f"auth:login:{get_client_ip(request)}", max_requests=20, window_seconds=60)
     email_clean = payload.email.strip().lower()
 
     # 1. Check lockout status

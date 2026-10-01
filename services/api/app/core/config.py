@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./tradeforge_dev.db")
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
 
+    # Email & Notifications
+    EMAIL_PROVIDER: str = Field(default="console")  # "console", "smtp"
+    SMTP_HOST: Optional[str] = Field(default=None)
+    SMTP_PORT: int = Field(default=587)
+    SMTP_USER: Optional[str] = Field(default=None)
+    SMTP_PASSWORD: Optional[str] = Field(default=None)
+    SMTP_FROM: str = Field(default="noreply@tradeforge.io")
+    SMTP_USE_TLS: bool = Field(default=True)
+
     @property
     def is_dev(self) -> bool:
         return self.ENVIRONMENT.lower() in ["development", "dev", "test", "testing"]
