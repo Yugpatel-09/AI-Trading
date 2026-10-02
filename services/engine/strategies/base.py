@@ -20,6 +20,8 @@ class StrategyContext:
         opening_range_low: Optional[float] = None,
         candle_history_15m: Optional[List[Candle]] = None,
         features: Optional[Dict[str, Any]] = None,
+        index_direction: Optional[int] = None,
+        index_candles: Optional[List[Candle]] = None,
     ):
         self.symbol = symbol
         self.current_candle = current_candle
@@ -32,6 +34,8 @@ class StrategyContext:
         self.opening_range_high = opening_range_high
         self.opening_range_low = opening_range_low
         self.features = features or {}
+        self.index_direction = index_direction
+        self.index_candles = index_candles or []
 
 class BaseStrategy(ABC):
     """

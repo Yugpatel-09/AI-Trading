@@ -3,9 +3,9 @@ import hmac
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
-from tradeforge_shared.enums import OrderType, TradingMode
+from tradeforge_shared.enums import BrokerType, OrderType, TradingMode
 from tradeforge_shared.schemas import (
     OrderProposal,
     RiskApproval,
@@ -14,6 +14,7 @@ from tradeforge_shared.schemas import (
 )
 
 from services.risk_guard.kill_switch import KillSwitch
+from services.risk_guard.session_manager import SessionManager
 from services.risk_guard.watchdog import FeedWatchdog
 
 
@@ -28,9 +29,11 @@ class RiskGuard:
         kill_switch: Optional[KillSwitch] = None,
         watchdog: Optional[FeedWatchdog] = None,
         signing_secret: Optional[str] = None,
+        session_manager: Optional[SessionManager] = None,
     ):
         self.kill_switch = kill_switch or KillSwitch()
         self.watchdog = watchdog or FeedWatchdog()
+        self.session_manager = session_manager or SessionManager()
         self.signing_secret = signing_secret or os.getenv("SECRET_KEY", "tradeforge_risk_guard_hmac_signing_key_default_32b")
         self._processed_idempotency_keys: Set[str] = set()
         self._user_daily_pnl: Dict[str, float] = {}
@@ -74,14 +77,13 @@ class RiskGuard:
                 f"({delay_ms}ms > {self.watchdog.max_staleness_ms}ms). Trading halted."
             )
 
-        # 3. Market Hours & 15:15 IST Square-Off Check
-        # Enforce trading hours server-side.
+        # 3. Market Hours & 15:15 IST Square-Off Check (Delegated to SessionManager)
         if enforce_trading_hours:
             ist_tz = timezone(timedelta(hours=5, minutes=30))
             now_ist = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(ist_tz)
             current_time_str = now_ist.strftime("%H:%M:%S")
 
-            if current_time_str >= "15:15:00":
+            if self.session_manager.is_square_off_time(now):
                 violations.append(
                     f"Intraday square-off cutoff reached: No new entries allowed after 15:15:00 IST (Current IST: {current_time_str})."
                 )
@@ -99,8 +101,8 @@ class RiskGuard:
         if proposal.idempotency_key in self._processed_idempotency_keys:
             violations.append(f"Duplicate order submission rejected (Key: {proposal.idempotency_key})")
 
-        # 5. Daily Trade Cap Check
-        current_trade_count = self._user_daily_trade_count.get(user_id, 0)
+        # 5. Daily Trade Cap Check (Enforced via SessionManager)
+        current_trade_count = self.session_manager.get_trade_count(user_id)
         if current_trade_count >= user_settings.max_daily_trades:
             violations.append(
                 f"Daily trade limit reached: {current_trade_count}/{user_settings.max_daily_trades} trades executed today."
@@ -132,8 +134,8 @@ class RiskGuard:
         if user_settings.allowed_instruments and signal.symbol not in user_settings.allowed_instruments:
             violations.append(f"Symbol {signal.symbol} is not in user allowed instruments list.")
 
-        # 10. Consecutive Loss Auto-Stop
-        current_losses = self._user_consecutive_losses.get(user_id, 0)
+        # 10. Consecutive Loss Auto-Stop (Enforced via SessionManager)
+        current_losses = self.session_manager.get_consecutive_losses(user_id)
         if current_losses >= user_settings.auto_stop_after_consecutive_losses:
             violations.append(
                 f"Auto-stop triggered: {current_losses} consecutive losses reached for today."
@@ -230,15 +232,31 @@ class RiskGuard:
 
     def record_trade_execution(self, user_id: str):
         """Increment daily executed trade count."""
-        self._user_daily_trade_count[user_id] = self._user_daily_trade_count.get(user_id, 0) + 1
+        self.session_manager.record_trade(user_id)
+        self._user_daily_trade_count[user_id] = self.session_manager.get_trade_count(user_id)
 
     def record_trade_completion(self, user_id: str, net_pnl: float):
         """Update user intraday ledger after trade closure."""
-        self._user_daily_pnl[user_id] = self._user_daily_pnl.get(user_id, 0.0) + net_pnl
-        if net_pnl < 0:
-            self._user_consecutive_losses[user_id] = self._user_consecutive_losses.get(user_id, 0) + 1
-        else:
-            self._user_consecutive_losses[user_id] = 0
+        self.session_manager.record_trade_result(user_id, net_pnl)
+        self._user_daily_pnl[user_id] = self.session_manager.get_daily_pnl(user_id)
+        self._user_consecutive_losses[user_id] = self.session_manager.get_consecutive_losses(user_id)
 
     def update_open_positions(self, user_id: str, count: int):
         self._user_open_positions[user_id] = max(0, count)
+
+    def generate_square_off_orders(
+        self,
+        user_id: str,
+        open_positions: List[Dict[str, Any]],
+        broker: BrokerType = BrokerType.PAPER,
+        mode: TradingMode = TradingMode.PAPER,
+        current_time: Optional[datetime] = None,
+    ) -> List[OrderProposal]:
+        """Generate closing orders for all open intraday positions."""
+        return self.session_manager.generate_square_off_proposals(
+            user_id=user_id,
+            open_positions=open_positions,
+            broker=broker,
+            mode=mode,
+            current_time=current_time,
+        )

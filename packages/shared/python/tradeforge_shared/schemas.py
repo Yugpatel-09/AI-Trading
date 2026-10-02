@@ -44,7 +44,7 @@ class Signal(BaseModel):
     trailing_stop_delta: Optional[float] = None
     time_stop_minutes: int = 45
     regime: MarketRegime
-    quality_score: float = Field(..., ge=0.0, le=1.0, description="LightGBM probability score")
+    quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Model probability score or None for NO_MODEL")
     expected_net_gain_pct: float
     reason: str = Field(..., description="Human-readable plain English rationale")
 

@@ -197,5 +197,57 @@ This document tracks progress, verifications, test evidence, and known limitatio
 ### Known Limitations
 - If a stock is completely halted intraday for multiple consecutive time buckets, resampled bars are only emitted for periods containing trading volume; no synthetic price interpolation is fabricated.
 
+---
+
+## WP-E: STRATEGIES AND REGIME
+
+### Status
+**DONE** (All WP-E requirements verified and tested with 120/120 passing tests across monorepo)
+
+### What Was Done
+1. **RegimeDetector with Institutional Indicators (`services/engine/regime/classifier.py`)**:
+   - Classifies market into `TRENDING_BULLISH`, `TRENDING_BEARISH`, `RANGE_BOUND`, and `VOLATILE_CHAOTIC`.
+   - Incorporates ADX (14) with +DI/-DI for directional conviction (ADX >= 20 threshold).
+   - Wilder ATR and overnight gap size thresholds (ATR% > 2.5% or Gap% > 3.0% trigger `VOLATILE_CHAOTIC`).
+   - Benchmark index agreement: if stock trend conflicts with the broader index direction, regime is downgraded to `RANGE_BOUND` to prevent trading against the market tide.
+   - All strategies query `RegimeDetector` first and return `None` in disallowed regimes (`RANGE_BOUND`, `VOLATILE_CHAOTIC`).
+2. **Symmetric SHORT Signals Across All Scalpers and ORB**:
+   - `Scalper1M`: Bearish VWAP pullback (tested VWAP from below and closed below with volume) in `TRENDING_BEARISH` regime with stop above entry and target below entry.
+   - `Scalper5M`: Bearish EMA 9 crossing below EMA 21 below VWAP in `TRENDING_BEARISH` regime with 15m trend agreement.
+   - `Scalper10MORB`: Bearish breakdown below opening range low with volume expansion and below VWAP in `TRENDING_BEARISH` regime.
+3. **Higher-Timeframe Trend Filters & Index Agreement**:
+   - `Scalper1M`: 5m trend filter (`candle_history_5m`) ensuring EMA9/21 and VWAP agreement.
+   - `Scalper5M`: 15m trend filter (`candle_history_15m`) ensuring higher-timeframe trend alignment.
+   - `Scalper10MORB`: Index-direction agreement filter ensuring trade direction aligns with index bias.
+4. **Removed Hardcoded Quality Scores & Built QualityModel Interface (`services/engine/models/quality_model.py`)**:
+   - Removed fake scores (`0.74`, `0.79`, `0.82`).
+   - Built `QualityModel` abstract interface.
+   - `NoModelPassThrough`: default model that reports `quality_score = None`, never a fabricated probability.
+5. **Unified SessionManager Enforced by Risk Guard (`services/risk_guard/session_manager.py`)**:
+   - All session and intraday risk rules consolidated into ONE place:
+     - No-entry opening window before 09:20:00 IST.
+     - No entries after 15:00:00 IST.
+     - Strict 15:15:00 IST square-off window blocking new entries.
+     - Automatic square-off order generator (`generate_square_off_orders`) creating market exit orders to flatten Long and Short positions.
+     - Daily trade cap ceiling.
+     - 3-consecutive-loss pause (pauses trading for the session, resets on winning trade).
+   - Wired directly into `RiskGuard.validate_proposal`, `record_trade_execution`, and `record_trade_completion`.
+6. **Mandatory Pre-Signal Cost Check**:
+   - Every strategy evaluates expected net profit via `IndianCostCalculator` modeling brokerage, STT, exchange charges, GST, stamp duty, SEBI fees, and slippage.
+   - Rejects any signal where net expected profit is <= 0.
+7. **Automated Evidence**:
+   - `services/engine/tests/test_regime_detector.py`: 6 tests verifying all 4 regimes, index conflict downgrading, and strategy suppression.
+   - `services/engine/tests/test_strategies_wp_e.py`: 6 tests verifying symmetric short signals, trend filters, index agreement, QualityModel interface, and cost checks.
+   - `services/risk_guard/tests/test_session_manager.py`: 8 tests verifying no-entry windows, 15:15 square-off, flattening order generation, daily trade cap, and 3 consecutive losses.
+   - Full test suite: **120/120 passed in 7.40s**.
+   - Ruff lint: **All checks passed with 0 errors**.
+
+### Not Done / Next Package
+- DataProvider interface with real CSV/Parquet files and broker historical API, walk-forward validation, and comprehensive metrics reporting (scheduled for WP-F).
+
+### Known Limitations
+- Strategies default to `NoModelPassThrough` which reports `quality_score = None` until the ML model pipeline in WP-J is trained on verified out-of-sample data.
+
+
 
 
