@@ -242,11 +242,51 @@ This document tracks progress, verifications, test evidence, and known limitatio
    - Full test suite: **120/120 passed in 7.40s**.
    - Ruff lint: **All checks passed with 0 errors**.
 
+---
+
+## WP-F: BACKTESTER
+
+### Status
+**DONE** (All WP-F requirements verified and tested with 128/128 passing tests across monorepo)
+
+### What Was Done
+1. **DataProvider Interface & Loaders (`services/backtester/data_providers/`)**:
+   - `DataProvider` base interface with `load_data(symbol, start_date, end_date, timeframe)` and validation for ascending chronological order and schema conformance.
+   - `CSVDataProvider`: loads historical NSE minute/daily bar data from standardized CSV files.
+   - `ParquetDataProvider`: loads high-performance column-oriented parquet historical data.
+   - `BrokerHistoricalDataProvider`: queries official broker historical candle APIs when valid credentials and active session tokens are supplied; strictly refuses execution and prompts for credentials if missing.
+   - Real data is the default; synthetic candle generation is strictly isolated inside unit-test fixtures (`tests/fixtures/synthetic_data.py`).
+2. **Real Data Specification (`data/historical/README.md`)**:
+   - Complete documentation of required format (ISO-8601 with `+05:30` IST timezone, Open/High/Low/Close/Volume/VWAP), naming conventions, and instructions for procuring genuine NSE minute historical data.
+3. **Execution & Cost Alignment with Live Engine**:
+   - Runs the EXACT same strategy classes (`Scalper1M`, `Scalper5M`, `Scalper10MORB`) as live and paper trading without separate logic.
+   - Models full Indian statutory costs and slippage via `IndianCostCalculator` on every round-trip trade (brokerage, STT, exchange turnover fees, GST, stamp duty, SEBI turnover fees, slippage).
+   - Supports symmetric short setups with protective stops and targets.
+   - Enforces session rules in backtest: daily trade cap, 3-consecutive-loss pause, no-entry before 09:20 IST, no-entry after 15:00 IST, and mandatory 15:15 IST intraday square-off.
+4. **Institutional Reporting Engine (`services/backtester/reports.py`)**:
+   - Net P&L after statutory costs and slippage.
+   - Max Drawdown (INR and %).
+   - Win Rate %, Profit Factor, Payoff Ratio.
+   - Average Win (INR) and Average Loss (INR).
+   - Monthly breakdown strictly reporting every month, including losing months (`losing_trades`, `gross_pnl`, `total_costs`, `net_pnl`, `win_rate_pct`).
+   - Institutional `OVERFITTING WARNING` triggered when:
+     - Win rate exceeds 85% on significant sample (>= 20 trades).
+     - Profit factor exceeds 5.0 on significant sample.
+     - Zero losing months across 3+ active months with >= 30 trades.
+5. **Walk-Forward Validation Engine (`services/backtester/walk_forward.py`)**:
+   - Sequential train/test out-of-sample window validation (rolling or anchored).
+   - Prevents lookahead bias and reports out-of-sample degradation and consistency metrics across folds.
+6. **Automated Evidence**:
+   - `services/backtester/tests/test_backtester_wp_f.py`: 8 tests covering CSV provider, Parquet provider, broker credential refusal, 15:15 square-off, daily trade cap, monthly breakdown including losing months, overfitting warnings, and walk-forward validation splits.
+   - Full test suite: **128/128 passed in 4.56s**.
+   - Ruff lint: **All checks passed with 0 errors**.
+
 ### Not Done / Next Package
-- DataProvider interface with real CSV/Parquet files and broker historical API, walk-forward validation, and comprehensive metrics reporting (scheduled for WP-F).
+- Real Kite Connect SDK broker adapter using encrypted tokens from vault, real funds/profile fetch, and contract tests (scheduled for WP-G).
 
 ### Known Limitations
-- Strategies default to `NoModelPassThrough` which reports `quality_score = None` until the ML model pipeline in WP-J is trained on verified out-of-sample data.
+- When using `BrokerHistoricalDataProvider`, rate limits (KiteConnect historical API limits of 3 req/sec) must be respected by callers during large batch backtests.
+- Walk-forward splits require at least 20 bars per fold for meaningful feature computation.
 
 
 
