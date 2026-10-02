@@ -100,4 +100,16 @@ class SecurityService:
         except jwt.PyJWTError:
             return None
 
+
 security_service = SecurityService()
+
+
+def hash_password(password: str) -> str:
+    return security_service.hash_password(password)
+
+
+def verify_password(plain_or_hash_1: str, plain_or_hash_2: str) -> bool:
+    # Handle both verify_password(plain, hashed) and verify_password(hashed, plain)
+    if plain_or_hash_1.startswith("$argon2"):
+        return security_service.verify_password(plain_or_hash_1, plain_or_hash_2)
+    return security_service.verify_password(plain_or_hash_2, plain_or_hash_1)

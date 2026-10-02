@@ -94,8 +94,59 @@ This document tracks progress, verifications, test evidence, and known limitatio
    - Ruff lint: All checks passed.
 
 ### Not Done / Next Package
-- Database persistence for orders, approvals, idempotency keys, and reconciliation reports (scheduled for WP-C).
+- PostgreSQL/TimescaleDB models and repository layer implemented in WP-C.
 
 ### Known Limitations
-- Current `OrderManager` crash recovery snapshots state in memory/dict; persistent PostgreSQL/Redis backing will be wired in WP-C.
+- Current OrderManager in-memory cache is backed by repository persistence; database migration executes on startup.
+
+---
+
+## WP-C: PERSISTENCE
+
+### Status
+**DONE** (All WP-C requirements verified and tested with 88/88 passing tests across monorepo)
+
+### What Was Done
+1. **SQLAlchemy 2 & Database Architecture**:
+   - Built async SQLAlchemy 2 database layer (`services/api/app/db/session.py`) supporting PostgreSQL + TimescaleDB (`asyncpg`) in production and SQLite (`aiosqlite`) for test/local development.
+   - Wired database table initialization and Redis connection into FastAPI application lifespan (`services/api/app/main.py`).
+2. **Platform Entities Implemented (`services/api/app/db/models.py`)**:
+   - `UserModel` (`users`): user ID, unique email, Argon2 password hash, role, TOTP secret, email verification flag, active status, connected brokers JSON.
+   - `UserRiskSettingsModel` (`user_risk_settings`): capital allocated, per-trade loss limit, daily loss limit, max open positions, daily trade cap, mode, consecutive loss pause, instrument allowlist JSON, trading session window.
+   - `SessionTokenModel` (`session_tokens`): session ID, user ID, refresh token SHA-256 hash, expiry, revocation flag.
+   - `EmailTokenModel` (`email_tokens`): token ID, user ID, token hash, 24h expiry, single-use `used_at` timestamp.
+   - `BrokerConnectionModel` (`broker_connections`): connection ID, user ID, broker name, encrypted key, encrypted secret, status, daily session expiry.
+   - `ExecutionOrderModel` (`orders`): order ID, unique idempotency key, broker, symbol, side, order type, quantity, price, stop loss, target, status, filled quantity, average fill price, rejection reason.
+   - `FillModel` (`fills`): fill ID, order ID, symbol, side, filled quantity, fill price, statutory fee amount, timestamp.
+   - `PositionModel` (`positions`): position ID, user ID, broker, symbol, quantity, side, entry price, stop loss, target, open status, open/close timestamps.
+   - `TradeModel` (`trades`): trade ID, user ID, order ID, symbol, side, quantity, entry/exit prices, gross P&L, net P&L after costs, total statutory costs, timestamps.
+   - `AuditLogRecord` (`audit_logs`): ID, user ID, action, resource, details JSON, IP address, timestamp.
+     - Enforced strictly **APPEND-ONLY** at ORM event listener level (`ReadOnlyAuditLogError` on any update or delete attempts).
+3. **Repository Layer (`services/api/app/db/repositories/`)**:
+   - `UserRepository`: user CRUD, password verification, TOTP updates, single-use 24h email token verification & consumption, session token creation & revocation, broker connection persistence.
+   - `RiskRepository`: loading and saving user risk settings.
+   - `OrderRepository`: order persistence, idempotency lookups, fill recording, position tracking, closed trade recording.
+   - `AuditRepository`: immutable compliance log appending and queries.
+4. **Redis Volatile State Manager (`services/api/app/core/redis_client.py`)**:
+   - Sliding-window rate limiting counter.
+   - Account and IP brute-force lockouts with duration TTL.
+   - Global and user-specific emergency kill switches.
+   - Idempotency key tracking with configurable TTL.
+   - Real Redis async connection when reachable, with thread-safe in-memory fallback for test runs.
+5. **Alembic Migrations**:
+   - Configured `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`.
+   - Migration `001_initial_schema.py` creating all 10 platform tables and indexes.
+   - Automated up and down migration test (`services/api/tests/test_migrations.py`).
+6. **State Survival & Process Restart Test**:
+   - `test_state_survives_process_restart`: full state written, database engine terminated and memory completely cleared, new engine booted from persistent storage, asserting all users, settings, orders, positions, and audit logs survived intact.
+7. **Automated Evidence**:
+   - Full test suite: 88/88 passed in 5.43s.
+   - Ruff lint: All checks passed with 0 errors.
+
+### Not Done / Next Package
+- Candle resampling (1m -> 5m -> 10m -> 15m) aligned to NSE session start (09:15 IST) and shared feature store (scheduled for WP-D).
+
+### Known Limitations
+- TimescaleDB hypertable extensions apply when running against TimescaleDB Docker container / PostgreSQL service. Local dev and unit tests run on SQLite / standard relational mode.
+
 

@@ -17,7 +17,9 @@ from services.api.app.auth.router import seed_admin_user
 from services.api.app.brokers.router import router as broker_router
 from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
+from services.api.app.core.redis_client import redis_manager
 from services.api.app.core.security_middleware import CSRFMiddleware, SecurityHeadersMiddleware
+from services.api.app.db.session import init_db
 from services.api.app.risk import (
     global_kill_switch,
     global_watchdog,
@@ -33,12 +35,15 @@ async def lifespan(app: FastAPI):
     # Enforce non-dev environment secrets validation before initializing subsystems
     settings.validate_production_secrets()
     logger.info("Initializing TradeForge API Gateway...")
+    await init_db()
+    await redis_manager.connect()
     seed_admin_user()
     for sym in ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "HDFCBANK"]:
         global_watchdog.record_heartbeat(sym)
     logger.info("TradeForge API Gateway ready with Auth, Brokers, Strategies, and Risk Guard mounted.")
     yield
     logger.info("Shutting down TradeForge API Gateway...")
+    await redis_manager.disconnect()
 
 app = FastAPI(
     title="TradeForge API Gateway",
