@@ -1,9 +1,20 @@
-from datetime import datetime
+"""
+TradeForge Cost-Aware Intraday Backtesting Engine.
+Executes the exact same strategy code that runs in paper and live trading.
+Models full Indian statutory costs (STT, GST, Stamp, Turnover, SEBI fees) and slippage.
+Delivers genuine multi-timeframe candle series (1m, 5m, 10m, 15m) without lookahead bias.
+"""
+
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
 from tradeforge_shared.costs import IndianCostBreakdown, IndianCostCalculator
+from tradeforge_shared.enums import OrderSide
 from tradeforge_shared.schemas import Candle, Signal
 
+from services.engine.data_feed.resampler import resample_candles
+from services.engine.features.store import FeatureStore
 from services.engine.strategies.base import BaseStrategy, StrategyContext
 
 
@@ -31,6 +42,7 @@ class BacktestTradeResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "symbol": self.signal.symbol,
+            "side": self.signal.side.value if hasattr(self.signal.side, "value") else str(self.signal.side),
             "entry_time": self.entry_time.isoformat() if hasattr(self.entry_time, "isoformat") else str(self.entry_time),
             "exit_time": self.exit_time.isoformat() if hasattr(self.exit_time, "isoformat") else str(self.exit_time),
             "entry_price": self.entry_price,
@@ -41,6 +53,7 @@ class BacktestTradeResult:
             "total_costs": self.cost_breakdown.total_costs,
             "net_pnl": self.cost_breakdown.net_pnl,
         }
+
 
 class Backtester:
     """
@@ -58,54 +71,102 @@ class Backtester:
         initial_capital: float = 100000.0,
         risk_per_trade_inr: float = 1000.0,
     ) -> Dict[str, Any]:
-        if len(candles) < 25:
-            return {"error": "Insufficient candle data for backtesting (min 25 candles required)"}
+        if len(candles) < 20:
+            return {"error": "Insufficient candle data for backtesting (min 20 candles required)"}
 
         symbol = candles[0].symbol
+        base_timeframe = candles[0].timeframe
         trades: List[BacktestTradeResult] = []
         equity_curve: List[float] = [initial_capital]
         current_equity = initial_capital
 
         active_trade: Optional[Dict[str, Any]] = None
-        opening_range_high = max(c.high for c in candles[:3]) if len(candles) >= 3 else None
-        opening_range_low = min(c.low for c in candles[:3]) if len(candles) >= 3 else None
 
-        for i in range(20, len(candles)):
+        # 1. Compute multi-timeframe series from input data without lookahead bias
+        candles_1m: List[Candle] = []
+        candles_5m: List[Candle] = []
+        candles_10m: List[Candle] = []
+        candles_15m: List[Candle] = []
+
+        if base_timeframe == "1m":
+            candles_1m = candles
+            candles_5m = resample_candles(candles, target_timeframe="5m", complete_only=True)
+            candles_10m = resample_candles(candles, target_timeframe="10m", complete_only=True)
+            candles_15m = resample_candles(candles, target_timeframe="15m", complete_only=True)
+        elif base_timeframe == "5m":
+            candles_5m = candles
+            candles_10m = resample_candles(candles, target_timeframe="10m", complete_only=True)
+            candles_15m = resample_candles(candles, target_timeframe="15m", complete_only=True)
+        elif base_timeframe == "10m":
+            candles_10m = candles
+        elif base_timeframe == "15m":
+            candles_15m = candles
+
+        # Pre-compute features from the shared FeatureStore
+        df_features = FeatureStore.compute_features_df(candles)
+
+        # Pre-compute closed candles index pointers for zero-lookahead lookup
+        # A higher timeframe candle starting at S with length M is closed at S + M
+        def get_closed_subseries(series: List[Candle], current_time: datetime, duration_minutes: int) -> List[Candle]:
+            cutoff = current_time - timedelta(minutes=0)
+            return [c for c in series if c.timestamp + timedelta(minutes=duration_minutes) <= cutoff]
+
+        start_idx = min(20, len(candles) - 1)
+        for i in range(start_idx, len(candles)):
             current_bar = candles[i]
-            history = candles[:i]
+            cur_time = current_bar.timestamp
 
-            # 1. Manage active position if one exists
+            # 2. Manage active position if one exists
             if active_trade:
                 entry_price = active_trade["entry_price"]
                 stop_loss = active_trade["stop_loss"]
                 target = active_trade["target"]
                 qty = active_trade["quantity"]
+                trade_side = active_trade["side"]
                 bars_held = active_trade["bars_held"] + 1
                 active_trade["bars_held"] = bars_held
 
                 exit_price = None
                 exit_reason = None
 
-                # Check Stop-Loss hit
-                if current_bar.low <= stop_loss:
-                    exit_price = stop_loss
-                    exit_reason = "STOP_LOSS_HIT"
-                # Check Target hit
-                elif current_bar.high >= target:
-                    exit_price = target
-                    exit_reason = "TARGET_HIT"
-                # Time Stop exit (e.g. 15 bars)
-                elif bars_held >= active_trade["time_stop_bars"]:
-                    exit_price = current_bar.close
-                    exit_reason = "TIME_STOP_EXPIRED"
+                if trade_side == OrderSide.BUY:
+                    # Long Position: Stop below entry, Target above entry
+                    if current_bar.low <= stop_loss:
+                        exit_price = stop_loss
+                        exit_reason = "STOP_LOSS_HIT"
+                    elif current_bar.high >= target:
+                        exit_price = target
+                        exit_reason = "TARGET_HIT"
+                    elif bars_held >= active_trade["time_stop_bars"]:
+                        exit_price = current_bar.close
+                        exit_reason = "TIME_STOP_EXPIRED"
+
+                    if exit_price is not None:
+                        costs = self.cost_calc.calculate_round_trip(
+                            buy_price=entry_price,
+                            sell_price=exit_price,
+                            quantity=qty,
+                        )
+                else:
+                    # Short Position: Stop above entry, Target below entry
+                    if current_bar.high >= stop_loss:
+                        exit_price = stop_loss
+                        exit_reason = "STOP_LOSS_HIT"
+                    elif current_bar.low <= target:
+                        exit_price = target
+                        exit_reason = "TARGET_HIT"
+                    elif bars_held >= active_trade["time_stop_bars"]:
+                        exit_price = current_bar.close
+                        exit_reason = "TIME_STOP_EXPIRED"
+
+                    if exit_price is not None:
+                        costs = self.cost_calc.calculate_round_trip(
+                            buy_price=exit_price,
+                            sell_price=entry_price,
+                            quantity=qty,
+                        )
 
                 if exit_price is not None:
-                    # Calculate Indian statutory costs
-                    costs = self.cost_calc.calculate_round_trip(
-                        buy_price=entry_price,
-                        sell_price=exit_price,
-                        quantity=qty,
-                    )
                     trade_res = BacktestTradeResult(
                         signal=active_trade["signal"],
                         entry_time=active_trade["entry_time"],
@@ -122,17 +183,63 @@ class Backtester:
                     active_trade = None
                 continue
 
-            # 2. Evaluate entry signal using identical strategy logic
+            # 3. Build time-accurate multi-timeframe history
+            if base_timeframe == "1m":
+                hist_1m = candles_1m[:i]
+                hist_5m = get_closed_subseries(candles_5m, cur_time, 5)
+                hist_10m = get_closed_subseries(candles_10m, cur_time, 10)
+                hist_15m = get_closed_subseries(candles_15m, cur_time, 15)
+            elif base_timeframe == "5m":
+                hist_1m = []
+                hist_5m = candles_5m[:i]
+                hist_10m = get_closed_subseries(candles_10m, cur_time, 10)
+                hist_15m = get_closed_subseries(candles_15m, cur_time, 15)
+            elif base_timeframe == "10m":
+                hist_1m = []
+                hist_5m = []
+                hist_10m = candles_10m[:i]
+                hist_15m = get_closed_subseries(candles_15m, cur_time, 15)
+            else:
+                hist_1m = []
+                hist_5m = []
+                hist_10m = []
+                hist_15m = candles[:i]
+
+            # 4. Extract features from the unified feature store
+            feat_row = df_features.iloc[i] if i < len(df_features) else None
+            vwap = (
+                float(feat_row["vwap"])
+                if feat_row is not None and not pd.isna(feat_row["vwap"])
+                else (current_bar.vwap or current_bar.close)
+            )
+            daily_open = (
+                float(feat_row["daily_open"])
+                if feat_row is not None and not pd.isna(feat_row["daily_open"])
+                else candles[0].open
+            )
+            or_h = (
+                float(feat_row["opening_range_high"])
+                if feat_row is not None and not pd.isna(feat_row["opening_range_high"])
+                else None
+            )
+            or_l = (
+                float(feat_row["opening_range_low"])
+                if feat_row is not None and not pd.isna(feat_row["opening_range_low"])
+                else None
+            )
+
             context = StrategyContext(
                 symbol=symbol,
                 current_candle=current_bar,
-                candle_history_1m=history,
-                candle_history_5m=history,
-                candle_history_10m=history,
-                vwap=current_bar.vwap or current_bar.close,
-                daily_open=candles[0].open,
-                opening_range_high=opening_range_high,
-                opening_range_low=opening_range_low,
+                candle_history_1m=hist_1m,
+                candle_history_5m=hist_5m,
+                candle_history_10m=hist_10m,
+                candle_history_15m=hist_15m,
+                vwap=vwap,
+                daily_open=daily_open,
+                opening_range_high=or_h,
+                opening_range_low=or_l,
+                features=feat_row.to_dict() if feat_row is not None else {},
             )
 
             signal = strategy.on_candle(context)
@@ -141,15 +248,24 @@ class Backtester:
                 if stop_distance > 0:
                     qty = max(1, int(risk_per_trade_inr / stop_distance))
                     # Pre-trade cost check: Expected gain must beat estimated statutory costs
-                    estimated_costs = self.cost_calc.calculate_round_trip(
-                        buy_price=signal.entry_price,
-                        sell_price=signal.target,
-                        quantity=qty,
-                    )
+                    if signal.side == OrderSide.BUY:
+                        estimated_costs = self.cost_calc.calculate_round_trip(
+                            buy_price=signal.entry_price,
+                            sell_price=signal.target,
+                            quantity=qty,
+                        )
+                    else:
+                        estimated_costs = self.cost_calc.calculate_round_trip(
+                            buy_price=signal.target,
+                            sell_price=signal.entry_price,
+                            quantity=qty,
+                        )
+
                     # Filter: setup rejected if net profit is <= 0 after taxes
                     if estimated_costs.net_pnl > 0:
                         active_trade = {
                             "signal": signal,
+                            "side": signal.side,
                             "entry_price": signal.entry_price,
                             "stop_loss": signal.stop_loss,
                             "target": signal.target,
@@ -194,5 +310,5 @@ class Backtester:
             "net_profit_after_costs_inr": round(net_profit, 2),
             "max_drawdown_inr": round(max_drawdown, 2),
             "max_drawdown_pct": round(max_dd_pct, 2),
-            "trades": [t.to_dict() for t in trades[:25]], # First 25 trades
+            "trades": [t.to_dict() for t in trades[:25]],
         }

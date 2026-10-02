@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from tradeforge_shared.enums import StrategyType
 from tradeforge_shared.schemas import Candle, Signal
@@ -18,16 +18,20 @@ class StrategyContext:
         daily_open: float,
         opening_range_high: Optional[float] = None,
         opening_range_low: Optional[float] = None,
+        candle_history_15m: Optional[List[Candle]] = None,
+        features: Optional[Dict[str, Any]] = None,
     ):
         self.symbol = symbol
         self.current_candle = current_candle
         self.candle_history_1m = candle_history_1m
         self.candle_history_5m = candle_history_5m
         self.candle_history_10m = candle_history_10m
+        self.candle_history_15m = candle_history_15m or []
         self.vwap = vwap
         self.daily_open = daily_open
         self.opening_range_high = opening_range_high
         self.opening_range_low = opening_range_low
+        self.features = features or {}
 
 class BaseStrategy(ABC):
     """

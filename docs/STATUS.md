@@ -149,4 +149,53 @@ This document tracks progress, verifications, test evidence, and known limitatio
 ### Known Limitations
 - TimescaleDB hypertable extensions apply when running against TimescaleDB Docker container / PostgreSQL service. Local dev and unit tests run on SQLite / standard relational mode.
 
+---
+
+## WP-D: FEATURES AND CANDLES
+
+### Status
+**DONE** (All WP-D requirements verified and tested with 100/100 passing tests across monorepo)
+
+### What Was Done
+1. **NSE-Aligned Candle Resampler (`services/engine/data_feed/resampler.py`)**:
+   - Resamples granular 1m candles into 5m, 10m, and 15m timeframes strictly aligned to the National Stock Exchange (NSE) 09:15:00 IST open.
+   - Handles the 15:30:00 IST session close cleanly (e.g. final 10m bucket 15:25–15:30 closes at market termination).
+   - **Zero Partial-Candle Leakage**: Incomplete buckets (e.g. 3 out of 5 minutes elapsed) are strictly excluded in `complete_only=True` mode, preventing lookahead bias.
+   - **Gaps and Multi-Day Holidays**: Grouping by IST trading calendar date ensures weekend, holiday, and overnight boundaries are never bridged into the same candle.
+   - **Event-Driven Streaming Resampler (`StreamingCandleResampler`)**: Real-time tick/candle processing that emits higher-timeframe bars the exact moment their bucket window elapses without lookahead.
+2. **Unified Institutional Feature Store (`services/engine/features/store.py`)**:
+   - Rule 5 compliant: ONE shared feature store used identically across backtest, paper, and live.
+   - Computes all 12 institutional market features:
+     - `ema_9` and `ema_21`
+     - Wilder-smoothed `rsi` (14)
+     - Wilder-smoothed `atr` (14)
+     - `adx` (14) with `plus_di` and `minus_di`
+     - `supertrend` (period 7, multiplier 3.0) and trend `supertrend_direction` (+1 / -1)
+     - `vwap` with strict daily reset at 09:15 IST open
+     - `vol_ratio` (relative to 20-period volume SMA)
+     - `opening_range_high` and `opening_range_low` (computed over session opening window; returns `None` before window closes, then freezes for the trading day)
+     - `spread_points` and `spread_pct`
+     - `time_of_day_minutes` (elapsed minutes since 09:15 IST open)
+     - `gap_points` and `gap_pct` (today's 09:15 open vs yesterday's 15:30 close)
+     - `daily_open` (today's opening price)
+   - Strongly-typed `MarketFeatures` Pydantic model for clean, type-checked feature access.
+3. **Fixed Backtester Multi-Timeframe Delivery (`services/backtester/engine.py`)**:
+   - Removed ad-hoc opening range logic (`candles[:3]`) that previously existed only in the backtester.
+   - Integrated `CandleResampler` to deliver distinct, real 1m, 5m, 10m, and 15m candle series to `StrategyContext`, not the same 1m list repeated three times.
+   - Enforced zero lookahead bias during iteration: only higher timeframe bars that have completed prior to or at `current_bar.timestamp` are visible to strategies.
+   - Added symmetric Long (BUY) and Short (SELL) position execution and statutory cost calculation.
+4. **Automated Evidence**:
+   - `services/engine/tests/test_resampler.py`: 6 tests verifying alignment, OHLCV+VWAP math, partial leakage prevention, streaming zero-lookahead, holiday separation, and 15:30 close.
+   - `services/engine/tests/test_feature_store.py`: 4 tests verifying presence of all 12 features, opening range freeze without leakage, overnight gap math, and typed model.
+   - `tests/test_scalpers_and_backtester.py`: added tests proving distinct multi-timeframe series delivery with zero lookahead, and running `Scalper10MORB` with feature store opening range.
+   - Full test suite: **100/100 passed in 5.56s**.
+   - Ruff lint: **All checks passed with 0 errors**.
+
+### Not Done / Next Package
+- Regime detection filter, symmetric short signals in scalpers, NO_MODEL quality interface, shared session risk manager, and expected net gain cost filter (scheduled for WP-E).
+
+### Known Limitations
+- If a stock is completely halted intraday for multiple consecutive time buckets, resampled bars are only emitted for periods containing trading volume; no synthetic price interpolation is fabricated.
+
+
 
