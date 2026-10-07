@@ -1,16 +1,20 @@
 import secrets
 import uuid
-from datetime import datetime, timezone
-from typing import Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.api.app.auth.email import get_email_sender
 from services.api.app.auth.security import security_service
 from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
-from services.api.app.core.security_middleware import enforce_rate_limit
+from services.api.app.core.redis_client import redis_manager
+from services.api.app.db.models import UserModel
+from services.api.app.db.repositories.user_repo import UserRepository
+from services.api.app.db.session import get_db_session
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication & 2FA"])
 
@@ -23,41 +27,16 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "127.0.0.1"
 
 
-# In-memory user store for development (isolated per user)
-class UserRecord:
-    def __init__(
-        self,
-        user_id: str,
-        email: str,
-        password_hash: str,
-        totp_secret: str,
-        is_2fa_enabled: bool = False,
-        is_admin: bool = False,
-        is_email_verified: bool = False,
-    ):
-        self.user_id = user_id
-        self.email = email
-        self.password_hash = password_hash
-        self.totp_secret = totp_secret
-        self.is_2fa_enabled = is_2fa_enabled
-        self.is_admin = is_admin
-        self.is_email_verified = is_email_verified
-        self.email_verification_token: Optional[str] = None
-        self.email_verification_sent_at: Optional[datetime] = None
-        self.live_trading_enabled: bool = False
-        self.connected_brokers: list[str] = ["PAPER"]
-
-
-USERS_DB: Dict[str, UserRecord] = {}
-
-
-def seed_admin_user() -> Optional[UserRecord]:
+async def seed_admin_user(session: AsyncSession) -> Optional[UserModel]:
     """Seed the platform administrator from environment configuration only."""
     if not settings.ADMIN_EMAIL:
         return None
     admin_email = settings.ADMIN_EMAIL.strip().lower()
-    if admin_email in USERS_DB:
-        return USERS_DB[admin_email]
+
+    repo = UserRepository(session)
+    existing = await repo.get_by_email(admin_email)
+    if existing:
+        return existing
 
     if not settings.ADMIN_PASSWORD or not settings.ADMIN_TOTP_SECRET:
         logger.info(
@@ -65,23 +44,43 @@ def seed_admin_user() -> Optional[UserRecord]:
         )
         return None
 
-    pw_hash = security_service.hash_password(settings.ADMIN_PASSWORD)
-    user = UserRecord(
-        user_id="usr_admin_platform",
+    user = UserModel(
+        id="usr_admin_platform",
         email=admin_email,
-        password_hash=pw_hash,
+        password_hash=security_service.hash_password(settings.ADMIN_PASSWORD),
+        role="ADMIN",
         totp_secret=settings.ADMIN_TOTP_SECRET,
-        is_2fa_enabled=True,
-        is_admin=True,
-        is_email_verified=True,
+        totp_enabled=True,
+        email_verified=True,
+        is_active=True,
+        connected_brokers=["PAPER"],
     )
-    USERS_DB[admin_email] = user
+    session.add(user)
+    await session.flush()
     logger.info(f"Platform admin seeded from environment: {admin_email}")
     return user
 
 
-# Seed platform admin on module load
-seed_admin_user()
+def seed_admin_user_sync() -> Optional[UserModel]:
+    """Synchronous helper for testing and offline admin seeding."""
+    import asyncio
+
+    from services.api.app.db.session import AsyncSessionLocal, init_db
+
+    async def _runner():
+        await init_db()
+        async with AsyncSessionLocal() as session:
+            admin = await seed_admin_user(session)
+            await session.commit()
+            return admin
+
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, _runner()).result()
+    except RuntimeError:
+        return asyncio.run(_runner())
 
 
 class SignupRequest(BaseModel):
@@ -113,7 +112,10 @@ class LoginRequest(BaseModel):
     totp_token: Optional[str] = Field(None, min_length=6, max_length=6)
 
 
-def get_current_user(authorization: Optional[str] = Header(None)) -> UserRecord:
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_db_session),
+) -> UserModel:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -127,7 +129,8 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> UserRecord:
             detail="Invalid or expired access token",
         )
     email = payload["sub"].strip().lower()
-    user = USERS_DB.get(email)
+    repo = UserRepository(session)
+    user = await repo.get_by_email(email)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -136,15 +139,30 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> UserRecord:
     return user
 
 
+async def _enforce_rate_limit_async(key: str, max_requests: int, window_seconds: int = 60):
+    """Async rate limiter using Redis (with in-memory fallback)."""
+    allowed = await redis_manager.check_rate_limit(key, max_requests, window_seconds)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded: {max_requests} requests per {window_seconds}s.",
+            headers={"Retry-After": str(window_seconds)},
+        )
+
+
 @router.post("/signup")
-async def signup(payload: SignupRequest, request: Request):
+async def signup(
+    payload: SignupRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Register new account.
     Enforces SEBI risk disclosure consent, generates TOTP 2FA secret, and dispatches email verification.
     Security: Administrator privileges can NEVER be granted through public signup.
     Tokens are dispatched by email and NEVER returned in API responses.
     """
-    enforce_rate_limit(f"auth:signup:{get_client_ip(request)}", max_requests=15, window_seconds=60)
+    await _enforce_rate_limit_async(f"auth:signup:{get_client_ip(request)}", max_requests=15, window_seconds=60)
     if not payload.consent_risk_disclosure or not payload.consent_terms or not payload.consent_data_use:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -152,7 +170,9 @@ async def signup(payload: SignupRequest, request: Request):
         )
 
     email_clean = payload.email.strip().lower()
-    if email_clean in USERS_DB:
+    repo = UserRepository(session)
+    existing = await repo.get_by_email(email_clean)
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email already exists.",
@@ -165,18 +185,24 @@ async def signup(payload: SignupRequest, request: Request):
     verification_token = secrets.token_hex(16)
 
     # Security: is_admin is strictly False for any public signup
-    user = UserRecord(
-        user_id=user_id,
+    user = UserModel(
+        id=user_id,
         email=email_clean,
         password_hash=pw_hash,
+        role="USER",
         totp_secret=totp_secret,
-        is_2fa_enabled=False,
-        is_admin=False,
-        is_email_verified=False,
+        totp_enabled=False,
+        email_verified=False,
+        is_active=True,
+        connected_brokers=["PAPER"],
     )
-    user.email_verification_token = verification_token
-    user.email_verification_sent_at = datetime.now(timezone.utc)
-    USERS_DB[email_clean] = user
+    session.add(user)
+    await session.flush()
+
+    # Create email verification token in DB
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    await repo.create_email_token(user_id, verification_token, expires_at)
+
     get_email_sender().send_verification_email(email_clean, verification_token)
 
     return {
@@ -190,37 +216,31 @@ async def signup(payload: SignupRequest, request: Request):
 
 
 @router.post("/verify-email")
-async def verify_email(payload: VerifyEmailRequest):
+async def verify_email(
+    payload: VerifyEmailRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Verify user's email address using registration token.
     Enforces a strict 24-hour expiration window.
     """
     email_clean = payload.email.strip().lower()
-    user = USERS_DB.get(email_clean)
+    repo = UserRepository(session)
+    user = await repo.get_by_email(email_clean)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    if user.is_email_verified:
+    if user.email_verified:
         return {"status": "success", "message": "Email is already verified."}
 
-    if not user.email_verification_token or user.email_verification_token != payload.token.strip():
+    now = datetime.now(timezone.utc)
+    user_id = await repo.verify_and_consume_email_token(payload.token.strip(), now)
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired email verification token.",
         )
 
-    # Enforce 24-hour expiration window
-    if user.email_verification_sent_at:
-        elapsed_seconds = (datetime.now(timezone.utc) - user.email_verification_sent_at).total_seconds()
-        if elapsed_seconds > 86400: # 24 hours
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email verification token has expired after 24 hours. Please request a new verification link.",
-            )
-
-    user.is_email_verified = True
-    user.email_verification_token = None
-    user.email_verification_sent_at = None
     logger.info(f"Email successfully verified for user: {email_clean}")
 
     return {
@@ -232,22 +252,29 @@ async def verify_email(payload: VerifyEmailRequest):
 
 
 @router.post("/resend-verification")
-async def resend_verification(payload: ResendVerificationRequest, request: Request):
+async def resend_verification(
+    payload: ResendVerificationRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Regenerate and resend email verification token. Token is not returned in API response.
     """
-    enforce_rate_limit(f"auth:resend:{get_client_ip(request)}", max_requests=10, window_seconds=60)
+    await _enforce_rate_limit_async(f"auth:resend:{get_client_ip(request)}", max_requests=10, window_seconds=60)
     email_clean = payload.email.strip().lower()
-    user = USERS_DB.get(email_clean)
+    repo = UserRepository(session)
+    user = await repo.get_by_email(email_clean)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    if user.is_email_verified:
+    if user.email_verified:
         return {"status": "success", "message": "Email is already verified."}
 
-    user.email_verification_token = secrets.token_hex(16)
-    user.email_verification_sent_at = datetime.now(timezone.utc)
-    get_email_sender().send_verification_email(email_clean, user.email_verification_token)
+    new_token = secrets.token_hex(16)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    await repo.create_email_token(user.id, new_token, expires_at)
+
+    get_email_sender().send_verification_email(email_clean, new_token)
 
     return {
         "status": "success",
@@ -257,29 +284,36 @@ async def resend_verification(payload: ResendVerificationRequest, request: Reque
 
 
 @router.post("/verify-2fa")
-async def verify_2fa(payload: Verify2FARequest, request: Request):
+async def verify_2fa(
+    payload: Verify2FARequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Verify 6-digit TOTP token to activate 2FA and receive authenticated JWT session.
     Security: Enforces account password check and brute-force lockout. Requires verified email.
     """
-    enforce_rate_limit(f"auth:2fa:{get_client_ip(request)}", max_requests=20, window_seconds=60)
+    await _enforce_rate_limit_async(f"auth:2fa:{get_client_ip(request)}", max_requests=20, window_seconds=60)
     email_clean = payload.email.strip().lower()
 
-    # 1. Check lockout status
-    locked, remaining = security_service.is_locked_out(email_clean)
-    if locked:
+    # 1. Check lockout status (Redis-backed with memory fallback)
+    is_locked = await redis_manager.is_locked_out(email_clean)
+    if not is_locked:
+        is_locked, _ = security_service.is_locked_out(email_clean)
+    if is_locked:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Account temporarily locked due to multiple failed attempts. Try again in {remaining} seconds.",
+            detail="Account temporarily locked due to multiple failed attempts. Try again later.",
         )
 
-    user = USERS_DB.get(email_clean)
+    repo = UserRepository(session)
+    user = await repo.get_by_email(email_clean)
     if not user:
-        security_service.record_failed_attempt(email_clean)
+        await _record_failed_attempt_redis(email_clean)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # 2. Check email verified
-    if not user.is_email_verified:
+    if not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email is not verified. Please verify your email before proceeding.",
@@ -288,7 +322,7 @@ async def verify_2fa(payload: Verify2FARequest, request: Request):
     # 3. Check password
     pw_matches = security_service.verify_password(user.password_hash, payload.password)
     if not pw_matches:
-        count = security_service.record_failed_attempt(email_clean)
+        count = await _record_failed_attempt_redis(email_clean)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid password. Attempt {count}/5 before lockout.",
@@ -297,60 +331,70 @@ async def verify_2fa(payload: Verify2FARequest, request: Request):
     # 4. Check TOTP token
     is_valid = security_service.verify_totp(user.totp_secret, payload.totp_token)
     if not is_valid:
-        count = security_service.record_failed_attempt(email_clean)
+        count = await _record_failed_attempt_redis(email_clean)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid 2FA code. Attempt {count}/5 before lockout.",
         )
 
     # Reset failed attempts on success
-    security_service.reset_failed_attempts(email_clean)
+    await _reset_failed_attempts_redis(email_clean)
 
-    user.is_2fa_enabled = True
+    # Mark 2FA as enabled in DB
+    if not user.totp_enabled:
+        await repo.update_totp(user.id, user.totp_secret, enabled=True)
+
     token = security_service.create_access_token(
         subject=user.email,
-        extra_claims={"user_id": user.user_id, "mode": "PAPER"},
+        extra_claims={"user_id": user.id, "mode": "PAPER"},
     )
     logger.info(f"User {email_clean} successfully verified 2FA.")
 
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user_id": user.user_id,
+        "user_id": user.id,
         "email": user.email,
         "is_2fa_enabled": True,
-        "is_admin": user.is_admin,
+        "is_admin": user.role == "ADMIN",
         "is_email_verified": True,
         "trading_mode": "PAPER",
     }
 
 
 @router.post("/login")
-async def login(payload: LoginRequest, request: Request):
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Authenticate user using Argon2 password and mandatory TOTP 2FA.
     Enforces brute-force lockout after 5 failed attempts and requires verified email.
     """
-    enforce_rate_limit(f"auth:login:{get_client_ip(request)}", max_requests=20, window_seconds=60)
+    await _enforce_rate_limit_async(f"auth:login:{get_client_ip(request)}", max_requests=20, window_seconds=60)
     email_clean = payload.email.strip().lower()
 
-    # 1. Check lockout status
-    locked, remaining = security_service.is_locked_out(email_clean)
-    if locked:
+    # 1. Check lockout status (Redis-backed with memory fallback)
+    is_locked = await redis_manager.is_locked_out(email_clean)
+    if not is_locked:
+        is_locked, _ = security_service.is_locked_out(email_clean)
+    if is_locked:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Account temporarily locked due to multiple failed attempts. Try again in {remaining} seconds.",
+            detail="Account temporarily locked due to multiple failed attempts. Try again later.",
         )
 
-    user = USERS_DB.get(email_clean)
+    repo = UserRepository(session)
+    user = await repo.get_by_email(email_clean)
     if not user:
-        security_service.record_failed_attempt(email_clean)
+        await _record_failed_attempt_redis(email_clean)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    if not user.is_email_verified:
+    if not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email is not verified. Please verify your email before logging in.",
@@ -359,7 +403,7 @@ async def login(payload: LoginRequest, request: Request):
     # 2. Verify password with Argon2
     pw_matches = security_service.verify_password(user.password_hash, payload.password)
     if not pw_matches:
-        count = security_service.record_failed_attempt(email_clean)
+        count = await _record_failed_attempt_redis(email_clean)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid email or password. Attempt {count}/5 before lockout.",
@@ -375,44 +419,85 @@ async def login(payload: LoginRequest, request: Request):
 
     totp_valid = security_service.verify_totp(user.totp_secret, payload.totp_token)
     if not totp_valid:
-        count = security_service.record_failed_attempt(email_clean)
+        count = await _record_failed_attempt_redis(email_clean)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid 2FA code. Attempt {count}/5 before lockout.",
         )
 
     # Reset attempts on success
-    security_service.reset_failed_attempts(email_clean)
+    await _reset_failed_attempts_redis(email_clean)
 
     token = security_service.create_access_token(
         subject=user.email,
-        extra_claims={"user_id": user.user_id, "mode": "PAPER"},
+        extra_claims={"user_id": user.id, "mode": "PAPER"},
     )
     logger.info(f"User {email_clean} successfully authenticated.")
 
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user_id": user.user_id,
+        "user_id": user.id,
         "email": user.email,
         "is_2fa_enabled": True,
-        "is_admin": user.is_admin,
+        "is_admin": user.role == "ADMIN",
         "is_email_verified": True,
         "trading_mode": "PAPER",
     }
 
 
 @router.get("/me")
-async def get_me(user: UserRecord = Depends(get_current_user)):
+async def get_me(user: UserModel = Depends(get_current_user)):
     """Fetch profile of authenticated user."""
     return {
-        "user_id": user.user_id,
+        "user_id": user.id,
         "email": user.email,
-        "is_admin": user.is_admin,
-        "is_email_verified": user.is_email_verified,
-        "is_2fa_enabled": user.is_2fa_enabled,
-        "live_trading_enabled": user.live_trading_enabled,
-        "connected_brokers": user.connected_brokers,
+        "is_admin": user.role == "ADMIN",
+        "is_email_verified": user.email_verified,
+        "is_2fa_enabled": user.totp_enabled,
+        "live_trading_enabled": False,
+        "connected_brokers": user.connected_brokers or ["PAPER"],
         "default_mode": "PAPER",
     }
 
+
+# -------------------------------------------------------------------------
+# Redis-backed brute-force tracking helpers
+# -------------------------------------------------------------------------
+async def _record_failed_attempt_redis(identifier: str) -> int:
+    """Record a failed auth attempt in Redis and return current count. Lock out at 5."""
+    count = security_service.record_failed_attempt(identifier)
+    key = f"auth_fail:{identifier}"
+    import time
+    now = time.time()
+    cutoff = now - 300
+
+    if redis_manager._is_connected and redis_manager._redis:
+        try:
+            pipe = redis_manager._redis.pipeline()
+            pipe.zremrangebyscore(key, 0, cutoff)
+            pipe.zadd(key, {str(now): now})
+            pipe.zcard(key)
+            pipe.expire(key, 310)
+            _, _, r_count, _ = await pipe.execute()
+            count = max(count, r_count)
+        except Exception:
+            pass
+
+    if count >= 5:
+        await redis_manager.record_lockout(identifier, 300)
+
+    return count
+
+
+async def _reset_failed_attempts_redis(identifier: str):
+    """Clear failed attempts from Redis."""
+    key = f"auth_fail:{identifier}"
+    if redis_manager._is_connected and redis_manager._redis:
+        try:
+            await redis_manager._redis.delete(key)
+            await redis_manager._redis.delete(f"lockout:{identifier}")
+        except Exception:
+            pass
+    redis_manager._mem_lockouts.pop(identifier, None)
+    security_service.reset_failed_attempts(identifier)

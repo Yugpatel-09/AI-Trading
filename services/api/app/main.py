@@ -19,7 +19,7 @@ from services.api.app.core.config import settings
 from services.api.app.core.logging import logger
 from services.api.app.core.redis_client import redis_manager
 from services.api.app.core.security_middleware import CSRFMiddleware, SecurityHeadersMiddleware
-from services.api.app.db.session import init_db
+from services.api.app.db.session import AsyncSessionLocal, init_db
 from services.api.app.risk import (
     global_kill_switch,
     global_watchdog,
@@ -37,7 +37,9 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing TradeForge API Gateway...")
     await init_db()
     await redis_manager.connect()
-    seed_admin_user()
+    async with AsyncSessionLocal() as session:
+        await seed_admin_user(session)
+        await session.commit()
     for sym in ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "HDFCBANK"]:
         global_watchdog.record_heartbeat(sym)
     logger.info("TradeForge API Gateway ready with Auth, Brokers, Strategies, and Risk Guard mounted.")

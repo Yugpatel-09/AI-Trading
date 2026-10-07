@@ -2,7 +2,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.api.app.auth.security import hash_password
@@ -86,7 +86,13 @@ class UserRepository:
         )
         res = await self.session.execute(stmt)
         record = res.scalar_one_or_none()
-        if not record or now > record.expires_at:
+        if not record:
+            return None
+        exp = record.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        now_utc = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        if now_utc > exp:
             return None
 
         record.used_at = now
@@ -177,3 +183,25 @@ class UserRepository:
             }
             for b in res.scalars().all()
         ]
+
+    async def get_broker_connection(self, user_id: str, broker_name: str) -> Optional[BrokerConnectionModel]:
+        stmt = (
+            select(BrokerConnectionModel)
+            .where(BrokerConnectionModel.user_id == user_id)
+            .where(BrokerConnectionModel.broker_name == broker_name)
+        )
+        res = await self.session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    async def delete_broker_connection(self, user_id: str, broker_name: str) -> bool:
+        stmt = (
+            delete(BrokerConnectionModel)
+            .where(BrokerConnectionModel.user_id == user_id)
+            .where(BrokerConnectionModel.broker_name == broker_name)
+        )
+        res = await self.session.execute(stmt)
+        user = await self.get_by_id(user_id)
+        if user and user.connected_brokers and broker_name in user.connected_brokers:
+            user.connected_brokers = [b for b in user.connected_brokers if b != broker_name]
+        await self.session.flush()
+        return bool(res.rowcount and res.rowcount > 0)

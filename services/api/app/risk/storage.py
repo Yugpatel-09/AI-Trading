@@ -1,11 +1,11 @@
-from typing import Dict, Set
+from typing import Set
 
 from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from tradeforge_shared.enums import TradingMode
 from tradeforge_shared.schemas import UserRiskSettings
 
-# In-memory store for server-controlled user risk limits
-USER_RISK_SETTINGS_STORE: Dict[str, UserRiskSettings] = {}
+from services.api.app.db.repositories.risk_repo import RiskRepository
 
 # Platform-level invariants that cannot be bypassed by any user
 PLATFORM_BLOCKED_SYMBOLS: Set[str] = {
@@ -35,14 +35,15 @@ def get_default_user_risk_settings(user_id: str) -> UserRiskSettings:
     )
 
 
-def get_user_risk_settings(user_id: str) -> UserRiskSettings:
-    """Retrieve user risk limits strictly from server-side state."""
-    if user_id not in USER_RISK_SETTINGS_STORE:
-        USER_RISK_SETTINGS_STORE[user_id] = get_default_user_risk_settings(user_id)
-    return USER_RISK_SETTINGS_STORE[user_id]
+async def get_user_risk_settings(user_id: str, session: AsyncSession) -> UserRiskSettings:
+    """Retrieve user risk limits from database, returning defaults if none stored."""
+    repo = RiskRepository(session)
+    return await repo.get_by_user_id(user_id)
 
 
-def update_user_risk_settings(user_id: str, new_settings: UserRiskSettings) -> UserRiskSettings:
+async def update_user_risk_settings(
+    user_id: str, new_settings: UserRiskSettings, session: AsyncSession
+) -> UserRiskSettings:
     """
     Update user risk settings after enforcing platform-level safety guardrails.
     Prevents client-side limit tampering or unsafe risk parameter expansion.
@@ -101,5 +102,5 @@ def update_user_risk_settings(user_id: str, new_settings: UserRiskSettings) -> U
                 detail=f"Symbol {sym.upper()} is on platform risk blocklist and cannot be added.",
             )
 
-    USER_RISK_SETTINGS_STORE[user_id] = new_settings
-    return new_settings
+    repo = RiskRepository(session)
+    return await repo.save_settings(new_settings)

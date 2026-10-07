@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import pytest
@@ -21,9 +22,33 @@ settings.ENCRYPTION_KEY_32BYTES_BASE64 = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nz
 
 
 @pytest.fixture(autouse=True)
-def auto_reset_rate_limiter():
-    """Ensure rate limit buckets are fresh for every unit test."""
+def clean_test_environment():
+    """Ensure database tables, rate limits, volatile redis state, and email tokens are clean for every test."""
+    from services.api.app.auth.email import ConsoleEmailSender
+    from services.api.app.auth.router import seed_admin_user_sync
+    from services.api.app.core.redis_client import redis_manager
     from services.api.app.core.security_middleware import rate_limiter
+    from services.api.app.db.session import init_db
+
     rate_limiter.reset()
+    redis_manager.reset_in_memory()
+    ConsoleEmailSender.sent_verification_tokens.clear()
+
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            pool.submit(asyncio.run, init_db(drop_all=True)).result()
+    except RuntimeError:
+        try:
+            asyncio.run(init_db(drop_all=True))
+        except Exception:
+            pass
+
+    seed_admin_user_sync()
+
     yield
+
     rate_limiter.reset()
+    redis_manager.reset_in_memory()
+    ConsoleEmailSender.sent_verification_tokens.clear()

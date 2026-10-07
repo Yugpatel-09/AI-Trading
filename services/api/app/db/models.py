@@ -42,6 +42,26 @@ class UserModel(Base):
     sessions: Mapped[List["SessionTokenModel"]] = relationship("SessionTokenModel", back_populates="user", cascade="all, delete-orphan")
     broker_connections: Mapped[List["BrokerConnectionModel"]] = relationship("BrokerConnectionModel", back_populates="user", cascade="all, delete-orphan")
 
+    @property
+    def user_id(self) -> str:
+        return self.id
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "ADMIN"
+
+    @property
+    def is_email_verified(self) -> bool:
+        return self.email_verified
+
+    @property
+    def is_2fa_enabled(self) -> bool:
+        return self.totp_enabled
+
+    @property
+    def live_trading_enabled(self) -> bool:
+        return False
+
 
 class UserRiskSettingsModel(Base):
     __tablename__ = "user_risk_settings"

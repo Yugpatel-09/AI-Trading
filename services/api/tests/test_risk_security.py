@@ -5,7 +5,8 @@ import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.app.auth.router import USERS_DB, seed_admin_user
+from services.api.app.auth.email import ConsoleEmailSender
+from services.api.app.auth.router import seed_admin_user_sync
 from services.api.app.auth.security import security_service
 from services.api.app.core.config import settings
 from services.api.app.main import app
@@ -34,7 +35,7 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
     secret = signup_data["totp_secret"]
     user_id = signup_data["user_id"]
     email_clean = email.strip().lower()
-    email_token = USERS_DB[email_clean].email_verification_token
+    email_token = ConsoleEmailSender.sent_verification_tokens[email_clean]
 
     # 1. Verify email
     v_res = client.post(
@@ -58,7 +59,7 @@ def register_and_login_user(email: str, password: str = "SecurePass123!", is_adm
 
 def login_admin():
     """Authenticate platform administrator seeded from environment."""
-    seed_admin_user()
+    seed_admin_user_sync()
     totp = pyotp.TOTP(settings.ADMIN_TOTP_SECRET)
     login_res = client.post(
         "/api/v1/auth/login",

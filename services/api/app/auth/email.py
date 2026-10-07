@@ -23,7 +23,10 @@ class EmailSender(ABC):
 
 class ConsoleEmailSender(EmailSender):
     """Development / Testing email sender. Outputs to logger."""
+    sent_verification_tokens: dict[str, str] = {}
+
     def send_verification_email(self, to_email: str, token: str) -> bool:
+        self.sent_verification_tokens[to_email.strip().lower()] = token
         logger.info(
             f"[EMAIL SENDER: DEV/TEST] Verification email to: {to_email} | Token: {token} "
             f"(Expires in 24 hours)"

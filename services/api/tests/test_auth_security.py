@@ -5,7 +5,8 @@ import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.app.auth.router import USERS_DB, seed_admin_user
+from services.api.app.auth.email import ConsoleEmailSender
+from services.api.app.auth.router import seed_admin_user_sync
 from services.api.app.auth.security import security_service
 from services.api.app.brokers.crypto_vault import BrokerTokenVault
 from services.api.app.core.config import Settings, settings
@@ -19,7 +20,7 @@ def setup_test_admin_credentials():
     """Ensure test admin credentials exist for test cases."""
     settings.ADMIN_PASSWORD = settings.ADMIN_PASSWORD or "TradeForge@Admin2026!"
     settings.ADMIN_TOTP_SECRET = settings.ADMIN_TOTP_SECRET or "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
-    seed_admin_user()
+    seed_admin_user_sync()
     yield
 
 
@@ -59,9 +60,7 @@ def test_signup_email_verification_and_2fa_flow():
     secret = data["totp_secret"]
 
     # Server holds token securely for dispatch
-    user = USERS_DB.get(email)
-    assert user is not None
-    v_token = user.email_verification_token
+    v_token = ConsoleEmailSender.sent_verification_tokens.get(email)
     assert v_token is not None
 
     # 2. Attempt 2FA BEFORE email verification -> MUST BE REJECTED (403 Forbidden)
@@ -124,15 +123,27 @@ def test_email_verification_token_expires_after_24_hours():
             "consent_data_use": True,
         },
     )
-    user = USERS_DB[email]
-    token = user.email_verification_token
+    token = ConsoleEmailSender.sent_verification_tokens.get(email)
+    assert token is not None
 
-    # Simulate token sent 25 hours ago
-    user.email_verification_sent_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    import asyncio
+
+    from sqlalchemy import update
+
+    from services.api.app.db.models import EmailTokenModel
+    from services.api.app.db.session import AsyncSessionLocal
+
+    async def _expire():
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(EmailTokenModel).values(expires_at=datetime.now(timezone.utc) - timedelta(hours=25))
+            )
+            await session.commit()
+    asyncio.run(_expire())
 
     res = client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
     assert res.status_code == 400
-    assert "expired after 24 hours" in res.json()["detail"].lower()
+    assert "expired" in res.json()["detail"].lower()
 
 
 def test_resend_verification_does_not_return_token():
@@ -149,15 +160,14 @@ def test_resend_verification_does_not_return_token():
             "consent_data_use": True,
         },
     )
-    user = USERS_DB[email]
-    initial_token = user.email_verification_token
+    initial_token = ConsoleEmailSender.sent_verification_tokens.get(email)
 
     res = client.post("/api/v1/auth/resend-verification", json={"email": email})
     assert res.status_code == 200
     data = res.json()
     assert "email_verification_token" not in data
     # Token was rotated in backend
-    assert user.email_verification_token != initial_token
+    assert ConsoleEmailSender.sent_verification_tokens.get(email) != initial_token
 
 
 def test_verify_2fa_requires_password_and_locks_out():
@@ -175,7 +185,7 @@ def test_verify_2fa_requires_password_and_locks_out():
         },
     )
     secret = s_res.json()["totp_secret"]
-    token = USERS_DB[email].email_verification_token
+    token = ConsoleEmailSender.sent_verification_tokens[email]
     client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
 
     totp = pyotp.TOTP(secret)
@@ -206,7 +216,7 @@ def test_verify_2fa_requires_password_and_locks_out():
 
 def test_admin_seeded_from_env_only():
     """Verify administrator is seeded from environment only and can authenticate."""
-    seed_admin_user()
+    seed_admin_user_sync()
     totp = pyotp.TOTP(settings.ADMIN_TOTP_SECRET)
 
     login_res = client.post(
@@ -258,10 +268,10 @@ def test_cannot_signup_as_admin():
     data = res_other.json()
 
     # Verify email via server token
-    user = USERS_DB["normal_trader_not_admin@tradeforge.io"]
+    token = ConsoleEmailSender.sent_verification_tokens["normal_trader_not_admin@tradeforge.io"]
     client.post(
         "/api/v1/auth/verify-email",
-        json={"email": "normal_trader_not_admin@tradeforge.io", "token": user.email_verification_token},
+        json={"email": "normal_trader_not_admin@tradeforge.io", "token": token},
     )
     # Verify 2FA
     totp = pyotp.TOTP(data["totp_secret"])
@@ -287,8 +297,7 @@ def test_brute_force_lockout():
     }
     s_res = client.post("/api/v1/auth/signup", json=signup_payload)
     assert s_res.status_code == 200
-    user = USERS_DB[email]
-    token = user.email_verification_token
+    token = ConsoleEmailSender.sent_verification_tokens[email]
     client.post("/api/v1/auth/verify-email", json={"email": email, "token": token})
 
     # 2. Submit 5 wrong passwords

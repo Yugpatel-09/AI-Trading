@@ -1,6 +1,8 @@
+import asyncio
 import hashlib
 import hmac
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -30,11 +32,30 @@ class RiskGuard:
         watchdog: Optional[FeedWatchdog] = None,
         signing_secret: Optional[str] = None,
         session_manager: Optional[SessionManager] = None,
+        redis_manager: Optional[Any] = None,
     ):
         self.kill_switch = kill_switch or KillSwitch()
         self.watchdog = watchdog or FeedWatchdog()
         self.session_manager = session_manager or SessionManager()
-        self.signing_secret = signing_secret or os.getenv("SECRET_KEY", "tradeforge_risk_guard_hmac_signing_key_default_32b")
+        self.redis_manager = redis_manager
+
+        # FIX-3: RiskGuard must refuse to sign approvals without an explicit signing key outside tests. No default key anywhere.
+        env = os.getenv("ENVIRONMENT", "").lower()
+        key = signing_secret or os.getenv("SECRET_KEY")
+        if env not in ["test", "testing"]:
+            if not key or key in (
+                "dev_secret_key_needs_replacement_in_production_32chars",
+                "tradeforge_risk_guard_hmac_signing_key_default_32b",
+            ):
+                raise RuntimeError(
+                    "RiskGuard refuses to initialize without an explicit, secure signing key outside tests."
+                )
+        else:
+            if not key:
+                raise RuntimeError(
+                    "RiskGuard refuses to initialize without an explicit signing key."
+                )
+        self.signing_secret = key
         self._processed_idempotency_keys: Set[str] = set()
         self._user_daily_pnl: Dict[str, float] = {}
         self._user_open_positions: Dict[str, int] = {}
@@ -98,7 +119,13 @@ class RiskGuard:
 
         # 4. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
         # Note: Idempotency key is recorded strictly ONLY after an order is approved.
-        if proposal.idempotency_key in self._processed_idempotency_keys:
+        is_duplicate = proposal.idempotency_key in self._processed_idempotency_keys
+        if not is_duplicate and self.redis_manager:
+            now_ts = time.time()
+            exp = self.redis_manager._mem_idempotency_keys.get(proposal.idempotency_key, 0.0)
+            if now_ts < exp:
+                is_duplicate = True
+        if is_duplicate:
             violations.append(f"Duplicate order submission rejected (Key: {proposal.idempotency_key})")
 
         # 5. Daily Trade Cap Check (Enforced via SessionManager)
@@ -183,6 +210,17 @@ class RiskGuard:
         if approved:
             # Rule 8: Record idempotency key strictly after order is approved
             self._processed_idempotency_keys.add(proposal.idempotency_key)
+            if self.redis_manager:
+                self.redis_manager._mem_idempotency_keys[proposal.idempotency_key] = time.time() + 86400
+                if self.redis_manager._is_connected and self.redis_manager._redis:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(self.redis_manager.check_and_record_idempotency_key(proposal.idempotency_key))
+                        else:
+                            loop.run_until_complete(self.redis_manager.check_and_record_idempotency_key(proposal.idempotency_key))
+                    except Exception:
+                        pass
 
             # Construct tamper-evident RiskApproval signed exclusively by RiskGuard
             canonical_proposal_data = (
