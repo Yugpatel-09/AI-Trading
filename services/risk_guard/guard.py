@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import hmac
 import os
@@ -34,10 +33,14 @@ class RiskGuard:
         session_manager: Optional[SessionManager] = None,
         redis_manager: Optional[Any] = None,
     ):
-        self.kill_switch = kill_switch or KillSwitch()
-        self.watchdog = watchdog or FeedWatchdog()
-        self.session_manager = session_manager or SessionManager()
         self.redis_manager = redis_manager
+        self.kill_switch = kill_switch or KillSwitch(redis_manager=self.redis_manager)
+        if self.kill_switch.redis_manager is None:
+            self.kill_switch.redis_manager = self.redis_manager
+        self.watchdog = watchdog or FeedWatchdog()
+        self.session_manager = session_manager or SessionManager(redis_manager=self.redis_manager)
+        if self.session_manager.redis_manager is None:
+            self.session_manager.redis_manager = self.redis_manager
 
         # FIX-3: RiskGuard must refuse to sign approvals without an explicit signing key outside tests. No default key anywhere.
         env = os.getenv("ENVIRONMENT", "").lower()
@@ -119,17 +122,22 @@ class RiskGuard:
 
         # 4. Idempotency Check (Rule 8: Duplicate submissions must be impossible)
         # Note: Idempotency key is recorded strictly ONLY after an order is approved.
-        is_duplicate = proposal.idempotency_key in self._processed_idempotency_keys
-        if not is_duplicate and self.redis_manager:
-            now_ts = time.time()
-            exp = self.redis_manager._mem_idempotency_keys.get(proposal.idempotency_key, 0.0)
-            if now_ts < exp:
-                is_duplicate = True
+        is_duplicate = False
+        if self.redis_manager and self.redis_manager.is_connected:
+            is_duplicate = self.redis_manager.is_idempotency_key_present_sync(proposal.idempotency_key)
+        else:
+            is_duplicate = proposal.idempotency_key in self._processed_idempotency_keys
+            if not is_duplicate and self.redis_manager:
+                now_ts = time.time()
+                exp = self.redis_manager._mem_idempotency_keys.get(proposal.idempotency_key, 0.0)
+                if now_ts < exp:
+                    is_duplicate = True
+
         if is_duplicate:
             violations.append(f"Duplicate order submission rejected (Key: {proposal.idempotency_key})")
 
         # 5. Daily Trade Cap Check (Enforced via SessionManager)
-        current_trade_count = self.session_manager.get_trade_count(user_id)
+        current_trade_count = self.session_manager.get_trade_count(user_id, current_time=now)
         if current_trade_count >= user_settings.max_daily_trades:
             violations.append(
                 f"Daily trade limit reached: {current_trade_count}/{user_settings.max_daily_trades} trades executed today."
@@ -162,14 +170,14 @@ class RiskGuard:
             violations.append(f"Symbol {signal.symbol} is not in user allowed instruments list.")
 
         # 10. Consecutive Loss Auto-Stop (Enforced via SessionManager)
-        current_losses = self.session_manager.get_consecutive_losses(user_id)
+        current_losses = self.session_manager.get_consecutive_losses(user_id, current_time=now)
         if current_losses >= user_settings.auto_stop_after_consecutive_losses:
             violations.append(
                 f"Auto-stop triggered: {current_losses} consecutive losses reached for today."
             )
 
-        # 11. Max Open Positions Check
-        current_positions = self._user_open_positions.get(user_id, 0)
+        # 11. Max Open Positions Check (Persisted in Redis)
+        current_positions = self.get_open_positions(user_id, current_time=now)
         if current_positions >= user_settings.max_open_positions:
             violations.append(
                 f"Max open positions limit ({user_settings.max_open_positions}) reached."
@@ -198,8 +206,8 @@ class RiskGuard:
                 adjusted_quantity = max_allowed_qty
                 calculated_risk = adjusted_quantity * stop_distance
 
-        # 13. Daily Loss Limit Check
-        current_daily_pnl = self._user_daily_pnl.get(user_id, 0.0)
+        # 13. Daily Loss Limit Check (Persisted in Redis)
+        current_daily_pnl = self.session_manager.get_daily_pnl(user_id, current_time=now)
         if current_daily_pnl <= -user_settings.max_daily_loss_inr:
             violations.append(
                 f"Daily loss limit ₹{user_settings.max_daily_loss_inr:.2f} already breached today (Current P&L: ₹{current_daily_pnl:.2f})."
@@ -210,17 +218,10 @@ class RiskGuard:
         if approved:
             # Rule 8: Record idempotency key strictly after order is approved
             self._processed_idempotency_keys.add(proposal.idempotency_key)
-            if self.redis_manager:
+            if self.redis_manager and self.redis_manager.is_connected:
+                self.redis_manager.record_idempotency_key_sync(proposal.idempotency_key, ttl_seconds=86400)
+            elif self.redis_manager:
                 self.redis_manager._mem_idempotency_keys[proposal.idempotency_key] = time.time() + 86400
-                if self.redis_manager._is_connected and self.redis_manager._redis:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(self.redis_manager.check_and_record_idempotency_key(proposal.idempotency_key))
-                        else:
-                            loop.run_until_complete(self.redis_manager.check_and_record_idempotency_key(proposal.idempotency_key))
-                    except Exception:
-                        pass
 
             # Construct tamper-evident RiskApproval signed exclusively by RiskGuard
             canonical_proposal_data = (
@@ -268,19 +269,30 @@ class RiskGuard:
             approval=approval,
         )
 
-    def record_trade_execution(self, user_id: str):
+    def record_trade_execution(self, user_id: str, current_time: Optional[datetime] = None):
         """Increment daily executed trade count."""
-        self.session_manager.record_trade(user_id)
-        self._user_daily_trade_count[user_id] = self.session_manager.get_trade_count(user_id)
+        self.session_manager.record_trade(user_id, current_time=current_time)
+        self._user_daily_trade_count[user_id] = self.session_manager.get_trade_count(user_id, current_time=current_time)
 
-    def record_trade_completion(self, user_id: str, net_pnl: float):
+    def record_trade_completion(self, user_id: str, net_pnl: float, current_time: Optional[datetime] = None):
         """Update user intraday ledger after trade closure."""
-        self.session_manager.record_trade_result(user_id, net_pnl)
-        self._user_daily_pnl[user_id] = self.session_manager.get_daily_pnl(user_id)
-        self._user_consecutive_losses[user_id] = self.session_manager.get_consecutive_losses(user_id)
+        self.session_manager.record_trade_result(user_id, net_pnl, current_time=current_time)
+        self._user_daily_pnl[user_id] = self.session_manager.get_daily_pnl(user_id, current_time=current_time)
+        self._user_consecutive_losses[user_id] = self.session_manager.get_consecutive_losses(user_id, current_time=current_time)
 
-    def update_open_positions(self, user_id: str, count: int):
-        self._user_open_positions[user_id] = max(0, count)
+    def update_open_positions(self, user_id: str, count: int, current_time: Optional[datetime] = None):
+        date_str = self.session_manager.get_trading_date(current_time)
+        if self.redis_manager and self.redis_manager.is_connected:
+            self.redis_manager.set_risk_open_positions_sync(user_id, date_str, max(0, count))
+        else:
+            self._user_open_positions[f"{user_id}:{date_str}"] = max(0, count)
+            self._user_open_positions[user_id] = max(0, count)
+
+    def get_open_positions(self, user_id: str, current_time: Optional[datetime] = None) -> int:
+        date_str = self.session_manager.get_trading_date(current_time)
+        if self.redis_manager and self.redis_manager.is_connected:
+            return self.redis_manager.get_risk_open_positions_sync(user_id, date_str)
+        return self._user_open_positions.get(f"{user_id}:{date_str}", self._user_open_positions.get(user_id, 0))
 
     def generate_square_off_orders(
         self,

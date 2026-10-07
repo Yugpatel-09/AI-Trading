@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from services.api.app.core.redis_client import redis_manager
+from services.api.app.core.config import settings
 from services.api.app.db.models import Base
 from services.api.app.db.repositories.risk_repo import RiskRepository
 from services.api.app.db.repositories.user_repo import UserRepository
@@ -96,24 +96,47 @@ async def test_app_restart_survival_users_settings_brokers_killswitch(tmp_path):
             expires_at=now + timedelta(hours=8),
         )
 
-        # 4. Kill Switch (volatile Redis state manager)
-        await redis_manager.set_global_kill_switch(True, reason="Restart Drill Test Halt")
-        await redis_manager.set_user_kill_switch(user.id, True, reason="User Risk Halt")
+        # 4. Kill Switch and Idempotency via Manager 1 (backed by shared Redis server)
+        import fakeredis
+        import fakeredis.aioredis
+
+        from services.api.app.core.redis_client import RedisStateManager
+        from services.risk_guard.kill_switch import KillSwitch
+
+        fake_server = fakeredis.FakeServer()
+        async_redis1 = fakeredis.aioredis.FakeRedis(server=fake_server, decode_responses=True)
+        sync_redis1 = fakeredis.FakeRedis(server=fake_server, decode_responses=True)
+        mgr1 = RedisStateManager(redis_client=async_redis1, sync_redis_client=sync_redis1)
+
+        await mgr1.set_global_kill_switch(True, reason="Restart Drill Test Halt")
+        await mgr1.set_user_kill_switch(user.id, True, reason="User Risk Halt")
+        await mgr1.record_idempotency_key("idemp_restart_test_key_001", ttl_seconds=86400)
 
         await session1.commit()
 
     # --- SIMULATE FULL PROCESS TERMINATION / RESTART ---
     await engine1.dispose()
+    del mgr1  # Discard in-memory structures of Process 1 completely
 
-    # --- Phase 2: Boot Fresh Process 2 from persisted disk ---
+    # --- Phase 2: Boot Fresh Process 2 from persisted disk and shared Redis ---
     engine2 = create_async_engine(db_url, echo=False)
     session_maker2 = async_sessionmaker(bind=engine2, class_=AsyncSession, expire_on_commit=False)
+
+    # Fresh Manager 2 instance with fresh in-memory state connecting to shared Redis
+    async_redis2 = fakeredis.aioredis.FakeRedis(server=fake_server, decode_responses=True)
+    sync_redis2 = fakeredis.FakeRedis(server=fake_server, decode_responses=True)
+    mgr2 = RedisStateManager(redis_client=async_redis2, sync_redis_client=sync_redis2)
+
+    # Verify that in-memory fallback was NOT used (mgr2 has empty _mem_* structures)
+    assert mgr2._mem_kill_switch_global == (False, "")
+    assert len(mgr2._mem_kill_switch_user) == 0
+    assert len(mgr2._mem_idempotency_keys) == 0
 
     async with session_maker2() as session2:
         u_repo2 = UserRepository(session2)
         r_repo2 = RiskRepository(session2)
 
-        # Verify User survived
+        # Verify User survived in database
         restarted_user = await u_repo2.get_by_email("restart_trader@tradeforge.io")
         assert restarted_user is not None
         assert restarted_user.id == user.id
@@ -121,14 +144,14 @@ async def test_app_restart_survival_users_settings_brokers_killswitch(tmp_path):
         assert restarted_user.totp_enabled is True
         assert "ZERODHA" in restarted_user.connected_brokers
 
-        # Verify Risk settings survived
+        # Verify Risk settings survived in database
         restarted_risk = await r_repo2.get_by_user_id(restarted_user.id)
         assert restarted_risk is not None
         assert restarted_risk.capital_allocated_inr == 250000.0
         assert restarted_risk.max_loss_per_trade_inr == 2500.0
         assert restarted_risk.mode == TradingMode.AUTO
 
-        # Verify Broker connection survived
+        # Verify Broker connection survived in database
         bconn = await u_repo2.get_broker_connection(restarted_user.id, "ZERODHA")
         assert bconn is not None
         assert bconn.encrypted_api_key == "vault_enc_key_zerodha"
@@ -138,14 +161,26 @@ async def test_app_restart_survival_users_settings_brokers_killswitch(tmp_path):
         assert len(brokers_list) == 1
         assert brokers_list[0]["broker"] == "ZERODHA"
 
-        # Verify Kill switch survived in Redis volatile state manager
-        global_active, g_reason = await redis_manager.is_global_kill_switch_active()
+        # Verify Kill switch survived in Redis across separate manager instances
+        global_active, g_reason = await mgr2.is_global_kill_switch_active()
         assert global_active is True
         assert "Restart Drill" in g_reason
 
-        user_active, u_reason = await redis_manager.is_user_kill_switch_active(restarted_user.id)
+        user_active, u_reason = await mgr2.is_user_kill_switch_active(restarted_user.id)
         assert user_active is True
         assert "User Risk Halt" in u_reason
+
+        # Verify KillSwitch component reading directly from Redis in fresh process
+        fresh_ks = KillSwitch(redis_manager=mgr2)
+        assert fresh_ks.is_global_active is True
+        assert fresh_ks.is_active_for_user(restarted_user.id) is True
+
+        # Verify Idempotency keys survived in Redis across separate manager instances
+        is_key_present = await mgr2.is_idempotency_key_present("idemp_restart_test_key_001")
+        assert is_key_present is True
+        # Attempt duplicate check-and-record: MUST return False (duplicate detected!)
+        is_new_recorded = await mgr2.check_and_record_idempotency_key("idemp_restart_test_key_001")
+        assert is_new_recorded is False
 
     await engine2.dispose()
 
@@ -184,3 +219,29 @@ def test_risk_guard_refuses_without_signing_key_outside_tests():
             os.environ.pop("ENVIRONMENT", None)
         if old_key is not None:
             os.environ["SECRET_KEY"] = old_key
+
+
+@pytest.mark.asyncio
+async def test_app_refuses_to_start_in_production_if_redis_unreachable(monkeypatch):
+    """
+    FIX-5 Verification:
+    In any environment outside 'development' or 'test', the app must refuse to start if Redis is unreachable.
+    """
+    from services.api.app.core.redis_client import RedisStateManager
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+
+    unreachable_mgr = RedisStateManager(redis_url="redis://127.0.0.1:59999/0")
+
+    # Async connect must raise
+    with pytest.raises(RuntimeError) as exc_info:
+        await unreachable_mgr.connect()
+    assert "Fatal: Redis daemon unreachable" in str(exc_info.value)
+    assert unreachable_mgr.is_connected is False
+
+    # Sync connect must raise
+    with pytest.raises(RuntimeError) as exc_info_sync:
+        unreachable_mgr.connect_sync()
+    assert "Fatal: Redis daemon unreachable" in str(exc_info_sync.value)
+    assert unreachable_mgr.is_connected is False
+

@@ -391,7 +391,7 @@ class OrderManager:
                 ) from sl_err
 
         # 5. Record execution in Risk Guard and internal ledger
-        self.risk_guard.record_trade_execution(proposal.user_id)
+        self.risk_guard.record_trade_execution(proposal.user_id, current_time=current_time)
         self._orders_by_id[order.order_id] = order
         self._orders_by_idempotency[proposal.idempotency_key] = order
 

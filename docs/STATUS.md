@@ -328,3 +328,51 @@ This document tracks progress, verifications, test evidence, and known limitatio
 ### Automated Evidence
 - Full test suite: **133/133 passed in 28.99s**.
 - Ruff lint: **All checks passed with 0 errors**.
+
+---
+
+## FIX-5 TO FIX-7: REAL REDIS READS, RISK STATE PERSISTENCE & PROCESS CRASH DRILL
+
+### Status
+**DONE** (All fixes verified and tested with 137/137 passing tests across monorepo)
+
+### What Was Done
+1. **FIX-5 (Real Redis Reads & Fail-Closed Startup Enforcement)**:
+   - Updated `RedisStateManager` (`services/api/app/core/redis_client.py`) with both async (`aioredis`) and sync (`redis.Redis`) clients sharing connection parameters.
+   - Refactored `KillSwitch`, rate limiting, lockouts, and idempotency key checks to read directly from Redis when connected (not `_mem_*` attributes).
+   - In-memory fallback (`_mem_*`) is strictly permitted **only** when `ENVIRONMENT` is `"development"` or `"test"`. In any other environment (`"production"`, `"staging"`, etc.), the app strictly refuses to start if Redis is unreachable, raising `RuntimeError("Fatal: Redis daemon unreachable at ...")`.
+   - Replaced restart test with one sharing a real/fake-redis server between two separate `RedisStateManager` instances (`mgr1` in Process 1, `mgr2` in Process 2), proving kill switch state and idempotency keys survive process termination without falling back to memory.
+
+2. **FIX-6 (Persist Risk Guard & Session Manager Per-User State)**:
+   - Moved `RiskGuard` and `SessionManager` per-user intraday state (daily P&L, consecutive losses, daily trade count, open positions, session pause flags) into Redis, keyed by `user_id` and trading date (IST `YYYY-MM-DD`) with 48h TTL:
+     - `risk:{user_id}:{date}:trade_count`
+     - `risk:{user_id}:{date}:daily_pnl`
+     - `risk:{user_id}:{date}:consecutive_losses`
+     - `risk:{user_id}:{date}:open_positions`
+     - `risk:{user_id}:{date}:session_paused`
+   - Added `tests/test_risk_persistence_fix6.py`:
+     - Executes 3 consecutive losses on `guard1`, destroys it, boots a completely fresh `guard2` with empty in-memory dictionaries, and proves the 3-consecutive-loss auto-pause and daily loss cap immediately apply and reject new order proposals.
+     - Proves open positions and daily trade count limits survive across fresh instances.
+
+3. **FIX-7 (Mid-Session Engine Process Crash & Recovery Drill)**:
+   - Added failure drill `tests/failure_drills/test_crash_recovery_drill_fix7.py`:
+     - **Pre-Crash Session**: Mid-session order executed, position recorded in DB and Redis, daily trade count incremented, and global kill switch tripped.
+     - **Simulate Crash**: Process 1 memory wiped, database connection disposed, all engine/risk/order objects deleted.
+     - **Process Restart**: Process 2 boots with empty in-memory state connected to shared Redis and DB.
+     - **Confirmed Recoveries**:
+       1. Intraday risk state (daily trade count, daily P&L, consecutive losses) is intact.
+       2. Open positions are intact in both DB repository and Redis.
+       3. Kill switch state survives across restart and blocks new orders.
+       4. **Nothing is double-ordered**: Re-submitting the exact same pre-crash order proposal is blocked by Redis idempotency check (broker gateway is never called, zero new orders in DB).
+       5. Recovered session safely reconciles and squares off the position.
+
+### Automated Evidence
+- Full test suite: **137/137 passed in 30.21s**.
+- Ruff lint: **All checks passed with 0 errors**.
+
+### Not Done / Next Package
+- **WP-G**: Real KiteConnect broker adapter (remove dummy values, ask user for credentials, test with mock KiteConnect SDK responses).
+- **WP-H**: Live data feed integration.
+- **WP-I**: Frontend wired to API (pending user's frontend layout design instructions).
+- **WP-J, WP-K, WP-L**: Paper-to-live approval flow, continuous monitoring, final production drills.
+
