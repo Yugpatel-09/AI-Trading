@@ -44,6 +44,7 @@ def test_alembic_migrations_up_and_down(tmp_path):
         "positions",
         "trades",
         "audit_logs",
+        "candles",
     }
     assert expected_tables.issubset(set(tables)), f"Missing expected tables in {tables}"
 

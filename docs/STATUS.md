@@ -370,9 +370,59 @@ This document tracks progress, verifications, test evidence, and known limitatio
 - Full test suite: **137/137 passed in 30.21s**.
 - Ruff lint: **All checks passed with 0 errors**.
 
-### Not Done / Next Package
-- **WP-G**: Real KiteConnect broker adapter (remove dummy values, ask user for credentials, test with mock KiteConnect SDK responses).
-- **WP-H**: Live data feed integration.
-- **WP-I**: Frontend wired to API (pending user's frontend layout design instructions).
-- **WP-J, WP-K, WP-L**: Paper-to-live approval flow, continuous monitoring, final production drills.
+---
+
+## PHASE 1: REAL DATA PIPELINE & TIMESCALEDB HYPERTABLE
+
+### Status
+**DONE** (All Phase 1 requirements verified with 147/147 passing tests across monorepo)
+
+### What Was Done
+1. **Official KiteConnect SDK & User-Isolated Streaming (ADR 0002)**:
+   - Added `kiteconnect>=5.0.0` to [pyproject.toml](file:///Users/yug/AI%20Trading/pyproject.toml).
+   - Authored [0002_user_isolated_market_data_streams.md](file:///Users/yug/AI%20Trading/docs/adr/0002_user_isolated_market_data_streams.md) establishing strict compliance with exchange data-vending regulations: each user connects exclusively using their own broker credentials, prohibiting cross-user data redistribution.
+   - Built `KiteTickerProvider` ([kite_provider.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/kite_provider.py)) managing per-user WebSocket ticker subscriptions.
+
+2. **Official NSE Market Calendar & Special Sessions**:
+   - Built `NSEMarketCalendar` ([calendar.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/calendar.py)) modeling standard trading hours (09:15 to 15:30 IST), pre-open (09:00 to 09:15 IST), official 2026 holidays, and Diwali Laxmi Pujan Muhurat special sessions.
+   - Fully configurable via `NSE_HOLIDAYS_CONFIG_PATH`.
+
+3. **Daily Instruments Registry & Circuit Limit Gate**:
+   - Built `InstrumentsRegistry` ([instruments.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/instruments.py)) caching the daily dump (`kite.instruments("NSE")`) to local disk with 24-hour TTL.
+   - Fast lookup for instrument tokens, lot sizes, tick sizes, price rounding, and upper/lower circuit limits.
+
+4. **Tick-to-Candle Aggregator (Zero Lookahead & Gap Handling)**:
+   - Built `TickToCandleAggregator` ([aggregator.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/aggregator.py)) strictly aligned to the 09:15:00 IST open.
+   - Converts cumulative daily volume into per-tick delta volume.
+   - Drops out-of-order ticks.
+   - Fills mid-session gaps with flat, zero-volume candles ($O=H=L=C=\text{last\_close}$, $V=0$).
+   - Emits **complete candles only** upon minute boundary close, preventing intra-bar lookahead bias.
+
+5. **Candle Persistence & Alembic Migration 002**:
+   - Added `CandleRecord` / `CandleModel` to [models.py](file:///Users/yug/AI%20Trading/services/api/app/db/models.py) with unique constraint on `(symbol, timeframe, timestamp)` compatible with TimescaleDB hypertables.
+   - Created Alembic migration [002_candles_table.py](file:///Users/yug/AI%20Trading/alembic/versions/002_candles_table.py).
+   - Built `CandleRepository` ([candle_repo.py](file:///Users/yug/AI%20Trading/services/api/app/db/repositories/candle_repo.py)) for batch upserts, chronological range queries, and cold-start chart hydration.
+
+6. **Feed Health Monitor & RiskGuard Watchdog Integration**:
+   - Built `FeedHealthMonitor` ([health.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/health.py)) tracking per-symbol tick latency.
+   - Transitions to `STALE` if latency exceeds `max_staleness_ms` (5,000ms), dispatches alerts, and updates `FeedWatchdog` so RiskGuard automatically rejects new entry orders.
+
+7. **Daily Kite Session & 09:00 Pre-Open Gatekeeper**:
+   - Built `KiteSessionManager` ([session_checker.py](file:///Users/yug/AI%20Trading/services/engine/data_feed/session_checker.py)) enforcing token checks via `kite.profile()`.
+   - Executes pre-open sanity check at 09:00 IST: blocks automated trading sessions if access tokens are expired and generates re-login URLs.
+
+### Automated Evidence
+- Full test suite: **147/147 passed in 31.22s**.
+  - Includes 10 dedicated Phase 1 integration tests in [test_kite_pipeline_wp_1.py](file:///Users/yug/AI%20Trading/services/engine/tests/test_kite_pipeline_wp_1.py).
+  - Migration up/down verified in [test_migrations.py](file:///Users/yug/AI%20Trading/services/api/tests/test_migrations.py).
+- Ruff lint: **All checks passed with 0 errors**.
+
+### Not Done / Next Phase
+- **Phase 2**: Real Kite Connect broker adapter (behind flags, off by default; MIS order execution, protective SL-M placement, fail-safe auto-flatten, SEBI algo tags, IP check).
+- **Phase 3**: Authenticated multi-channel WebSocket architecture.
+- **Phase 4**: Production indicators & scalper parity.
+- **Phase 5**: Frontend wired to live APIs.
+- **Phase 6**: Production deployment configs & failure drills.
+- **Phase 7**: Launch promotion gates.
+
 

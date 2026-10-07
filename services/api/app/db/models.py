@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     event,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -229,3 +230,29 @@ def receive_audit_log_before_delete(mapper, connection, target):
     raise ReadOnlyAuditLogError(
         "CRITICAL COMPLIANCE VIOLATION: Audit log records are strictly append-only. Deletion is prohibited."
     )
+
+
+class CandleRecord(Base):
+    """
+    Market Candle Data Model (TimescaleDB Hypertable compatible).
+    Stores OHLCV bars for multi-timeframe analysis, charting, and warm startup.
+    """
+    __tablename__ = "candles"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: f"cnd_{uuid.uuid4().hex[:12]}")
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[int] = mapped_column(Integer, nullable=False)
+    vwap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candles_sym_tf_ts"),
+    )
+
+
+CandleModel = CandleRecord
