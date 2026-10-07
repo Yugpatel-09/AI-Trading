@@ -21,6 +21,8 @@ class PaperBroker(BrokerGateway):
         signing_secret: Optional[str] = None,
         simulate_partial_fill_qty: Optional[int] = None,
         simulate_stop_placement_failure: bool = False,
+        slippage_bps: float = 2.0,
+        spread_bps: float = 1.0,
     ):
         super().__init__(signing_secret=signing_secret)
         self.initial_capital = initial_capital
@@ -30,6 +32,8 @@ class PaperBroker(BrokerGateway):
         self.cost_calculator = IndianCostCalculator()
         self.simulate_partial_fill_qty = simulate_partial_fill_qty
         self.simulate_stop_placement_failure = simulate_stop_placement_failure
+        self.slippage_bps = slippage_bps
+        self.spread_bps = spread_bps
 
     async def place_order(
         self,
@@ -42,8 +46,11 @@ class PaperBroker(BrokerGateway):
         order_id = f"paper_ord_{uuid.uuid4().hex[:10]}"
         now = current_time or datetime.now(timezone.utc)
 
-        # In paper mode, simulated fill with 0.02% slippage
-        fill_price = approval.price * 1.0002 if approval.side == OrderSide.BUY else approval.price * 0.9998
+        # Configurable slippage and spread: Ask for BUY, Bid for SELL
+        half_spread_frac = (self.spread_bps / 2.0) / 10000.0
+        slippage_frac = self.slippage_bps / 10000.0
+        total_impact = half_spread_frac + slippage_frac
+        fill_price = approval.price * (1.0 + total_impact) if approval.side == OrderSide.BUY else approval.price * (1.0 - total_impact)
 
         # Support partial fills if configured for drills/simulations
         if self.simulate_partial_fill_qty is not None and self.simulate_partial_fill_qty < approval.approved_quantity:

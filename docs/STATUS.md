@@ -288,6 +288,43 @@ This document tracks progress, verifications, test evidence, and known limitatio
 - When using `BrokerHistoricalDataProvider`, rate limits (KiteConnect historical API limits of 3 req/sec) must be respected by callers during large batch backtests.
 - Walk-forward splits require at least 20 bars per fold for meaningful feature computation.
 
+---
 
+## FIX-1 TO FIX-4: ARCHITECTURAL HARDENING & TRADING LOOP
 
+### Status
+**DONE** (All fixes verified and tested with 133/133 passing tests across monorepo)
 
+### What Was Done
+1. **FIX-1 (PyArrow Dependency)**:
+   - Added `pyarrow>=15.0.0` to `pyproject.toml` dependencies.
+   - Clean environment install verified with parquet data provider integration.
+
+2. **FIX-2 (Wire Persistence & Remove In-Memory Stores)**:
+   - Eliminated all in-memory dictionaries (`USERS_DB`, `USER_RISK_SETTINGS_STORE`, `BROKER_CONNECTIONS`) from API routers.
+   - Wired auth (`services/api/app/auth/router.py`), broker connections (`services/api/app/brokers/router.py`), and risk settings (`services/api/app/risk/router.py`) directly to SQLAlchemy repositories (`UserRepository`, `RiskRepository`, `OrderRepository`, `AuditRepository`) and database sessions (`AsyncSession = Depends(get_db_session)`).
+   - Moved rate limiting, lockouts, kill switch state, and idempotency tracking to Redis (`services/api/app/core/redis.py`).
+   - Added `test_persistence_wiring_fix2.py`:
+     - AST static analysis verifying zero route references to in-memory stores.
+     - Process restart / engine disposal test proving users, broker connections, risk settings, and kill-switch state survive restarts.
+
+3. **FIX-3 (RiskGuard Signing Secret Fail-Closed)**:
+   - `RiskGuard` (`services/risk_guard/guard.py`) strictly enforces fail-closed signing secret configuration.
+   - Outside of pytest test environments, missing or default secret keys immediately raise `RuntimeError` and halt approval signing.
+
+4. **FIX-4 (Autonomous Trading Loop Runner & Paper Broker Slippage)**:
+   - Configurable slippage (`slippage_bps=2.0`) and spread (`spread_bps=1.0`) added to `PaperBroker` (`services/execution/gateway/paper_broker.py`), applying realistic Ask on BUY and Bid on SELL.
+   - Built `MarketDataProvider` abstract interface and `HistoricalReplayProvider` (`services/engine/runner.py`) for sequential, zero-lookahead candle streaming.
+   - Built `TradingLoopRunner` (`services/engine/runner.py`) linking:
+     `Provider -> FeedWatchdog -> FeatureStore -> Strategies -> RiskGuard -> OrderManager -> Gateway -> Database Repositories`.
+   - Manages active positions, protective stop-loss triggers, profit targets, and 15:15 IST intraday session square-off cutoff.
+   - Calculates statutory Indian round-trip taxes/costs via `IndianCostCalculator`.
+   - Persists execution state to DB tables: `orders`, `fills`, `positions`, `trades`, and append-only `audit_logs`.
+   - Added `tests/test_trading_loop_fix4.py`:
+     - Replays a full 375-minute NSE session (09:15 to 15:30 IST).
+     - Confirms strategy trigger, order placement with protective stop, target exit, cost modeling, and database persistence.
+   - Preserved architectural boundary: gateways remain strictly encapsulated behind `OrderManager` (`test_gateway_access_boundary.py` passes).
+
+### Automated Evidence
+- Full test suite: **133/133 passed in 28.99s**.
+- Ruff lint: **All checks passed with 0 errors**.

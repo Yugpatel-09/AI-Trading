@@ -11,9 +11,9 @@ class FeedWatchdog:
         self.max_staleness_ms = max_staleness_ms
         self._last_tick_time: dict[str, datetime] = {}
 
-    def record_heartbeat(self, symbol: str, timestamp: datetime | None = None):
+    def record_heartbeat(self, symbol: str, timestamp: datetime | None = None, current_time: datetime | None = None):
         """Record latest tick/candle reception timestamp."""
-        self._last_tick_time[symbol] = timestamp or datetime.now(timezone.utc)
+        self._last_tick_time[symbol] = timestamp or current_time or datetime.now(timezone.utc)
 
     def is_feed_fresh(self, symbol: str, current_time: datetime | None = None) -> tuple[bool, int]:
         """

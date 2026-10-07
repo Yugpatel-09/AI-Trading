@@ -213,6 +213,9 @@ class AuditLogRecord(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+AuditLogModel = AuditLogRecord
+
+
 # Enforce append-only invariants on AuditLogRecord
 @event.listens_for(AuditLogRecord, "before_update")
 def receive_audit_log_before_update(mapper, connection, target):

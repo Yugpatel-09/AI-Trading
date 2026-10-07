@@ -77,10 +77,18 @@ class OrderManager:
         risk_guard: Optional[RiskGuard] = None,
         gateways: Optional[Dict[BrokerType, BrokerGateway]] = None,
         approval_timeout_seconds: int = 60,
+        paper_initial_capital: float = 1_000_000.0,
+        paper_slippage_bps: float = 2.0,
+        paper_spread_bps: float = 1.0,
     ):
         self.risk_guard = risk_guard or RiskGuard()
         self._gateways: Dict[BrokerType, BrokerGateway] = gateways or {
-            BrokerType.PAPER: PaperBroker(),
+            BrokerType.PAPER: PaperBroker(
+                initial_capital=paper_initial_capital,
+                signing_secret=self.risk_guard.signing_secret,
+                slippage_bps=paper_slippage_bps,
+                spread_bps=paper_spread_bps,
+            ),
         }
         self.approval_timeout_seconds = approval_timeout_seconds
         self._orders_by_id: Dict[str, ExecutionOrder] = {}
